@@ -88,6 +88,12 @@ For controlled test batches, use `--max-facilities-per-page` and
 storage/raw/aphis_public_search_tool/YYYY-MM-DD/
 ```
 
+Collect one APHIS enforcement action PDF:
+
+```powershell
+python scripts\collect_aphis_enforcement_actions.py --max-pages 1 --max-documents 1
+```
+
 ### Run Smoke Test
 
 ```powershell
@@ -140,7 +146,7 @@ backend/
 
 - SQLite only (PostgreSQL/Supabase planned next)
 - No authentication
-- APHIS automation currently covers inspection report PDFs
+- APHIS automation currently covers inspection report and enforcement action PDFs
 - No OCR or AI features
 - No frontend dashboard
 - No vector search or graph database
@@ -148,7 +154,7 @@ backend/
 ## Next Steps
 
 1. Connect to Supabase PostgreSQL
-2. Extend APHIS collection to enforcement actions and other record types
+2. Extend APHIS collection to other record types
 3. Add OCR pipeline for PDF processing
 4. Build vector search for document retrieval
 5. Add authentication and authorization

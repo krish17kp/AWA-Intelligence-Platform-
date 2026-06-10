@@ -22,6 +22,10 @@ SOURCE_TYPE = "awa_inspection_report"
 INSPECTION_REPORTS_URL = (
     "https://aphis.my.site.com/PublicSearchTool/s/inspection-reports"
 )
+ENFORCEMENT_ACTIONS_URL = (
+    "https://www.aphis.usda.gov/animal-care/awa-services/"
+    "animal-welfare-horse-protection-actions"
+)
 PDF_BASE_URL = "https://aphis.file.force.com"
 HASH_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
@@ -246,6 +250,206 @@ def discover_inspection_reports(
     if max_documents > 0:
         return records[:max_documents]
     return records
+
+
+def discover_enforcement_actions(
+    max_pages: int = 1,
+    headless: bool = True,
+) -> list[dict[str, Any]]:
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as error:
+        raise RuntimeError(
+            "Playwright is required. Install requirements and run "
+            "'playwright install chromium'."
+        ) from error
+
+    records: list[dict[str, Any]] = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=headless, args=["--no-sandbox"])
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        try:
+            page.goto(
+                ENFORCEMENT_ACTIONS_URL,
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+            page.wait_for_timeout(10000)
+
+            current_page = 1
+            while True:
+                for row in page.locator("table tbody tr").all():
+                    cells = row.locator("td")
+                    if cells.count() < 7:
+                        continue
+                    link = cells.nth(0).locator("a")
+                    href = link.get_attribute("href") if link.count() else None
+                    if not href:
+                        continue
+
+                    records.append(
+                        {
+                            "dba": cells.nth(0).inner_text().strip(),
+                            "certificate_number": cells.nth(2).inner_text().strip(),
+                            "customer_number": cells.nth(3).inner_text().strip(),
+                            "license_category": cells.nth(4).inner_text().strip(),
+                            "action_date": cells.nth(5).inner_text().strip(),
+                            "action_type": cells.nth(6).inner_text().strip(),
+                            "reportLink": urljoin(ENFORCEMENT_ACTIONS_URL, href),
+                        }
+                    )
+
+                if max_pages > 0 and current_page >= max_pages:
+                    break
+
+                next_button = page.locator("button.dt-paging-button.next")
+                classes = (
+                    next_button.first.get_attribute("class")
+                    if next_button.count()
+                    else ""
+                )
+                if next_button.count() == 0 or "disabled" in (classes or ""):
+                    break
+                next_button.first.click()
+                page.wait_for_timeout(3000)
+                current_page += 1
+        except PlaywrightTimeoutError as error:
+            raise RuntimeError("APHIS enforcement actions page timed out") from error
+        finally:
+            browser.close()
+
+    unique_records: dict[str, dict[str, Any]] = {}
+    for record in records:
+        unique_records[record["reportLink"]] = record
+    return list(unique_records.values())
+
+
+def ingest_enforcement_actions(
+    db: Session,
+    max_pages: int = 1,
+    max_documents: int = 0,
+    headless: bool = True,
+) -> dict[str, Any]:
+    ingestion_run = IngestionRun(
+        source_name=SOURCE_NAME,
+        run_status="running",
+        started_at=datetime.now(timezone.utc),
+        records_found=0,
+        records_saved=0,
+    )
+    db.add(ingestion_run)
+    db.commit()
+    db.refresh(ingestion_run)
+    ingestion_run_id = ingestion_run.id
+
+    duplicates_skipped = 0
+    download_failures = 0
+
+    try:
+        records = discover_enforcement_actions(
+            max_pages=max_pages,
+            headless=headless,
+        )
+        if max_documents > 0:
+            records = records[:max_documents]
+        ingestion_run.records_found = len(records)
+
+        for record in records:
+            source_url = record["reportLink"]
+            existing_url = (
+                db.query(SourceDocument.id)
+                .filter(
+                    SourceDocument.source_name == SOURCE_NAME,
+                    SourceDocument.source_url == source_url,
+                )
+                .first()
+            )
+            if existing_url:
+                duplicates_skipped += 1
+                continue
+
+            try:
+                content = download_pdf_bytes(source_url)
+            except RuntimeError as error:
+                download_failures += 1
+                logger.error("Skipping APHIS enforcement PDF: %s", error)
+                continue
+
+            content_hash = sha256_bytes(content)
+            existing_content = (
+                db.query(SourceDocument.id)
+                .filter(
+                    SourceDocument.source_name == SOURCE_NAME,
+                    or_(
+                        SourceDocument.source_url == source_url,
+                        SourceDocument.content_hash == content_hash,
+                    ),
+                )
+                .first()
+            )
+            if existing_content:
+                duplicates_skipped += 1
+                continue
+
+            source_id = generate_hash_id(source_url)
+            storage_path = save_raw_bytes(
+                source_name=SOURCE_NAME,
+                filename=f"enforcement_{source_id}_{content_hash[:12]}.pdf",
+                content=content,
+            )
+            document_date = parse_aphis_date(record.get("action_date"))
+            title = "APHIS enforcement action"
+            if record.get("dba"):
+                title += f" - {record['dba']}"
+            if record.get("action_type"):
+                title += f" - {record['action_type']}"
+
+            db.add(
+                SourceDocument(
+                    source_name=SOURCE_NAME,
+                    source_type="awa_enforcement_action",
+                    source_url=source_url,
+                    document_title=title,
+                    document_date=document_date,
+                    retrieved_at=datetime.now(timezone.utc),
+                    content_hash=content_hash,
+                    storage_path=storage_path,
+                    mime_type="application/pdf",
+                    file_size_bytes=len(content),
+                    raw_metadata_json={
+                        **record,
+                        "record_type": "enforcement_action",
+                        "collection_method": "playwright_html_table",
+                        "source_record_id": source_id,
+                    },
+                )
+            )
+            db.commit()
+            ingestion_run.records_saved += 1
+
+        ingestion_run.run_status = (
+            "partial_success" if download_failures else "success"
+        )
+        ingestion_run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        return {
+            "ingestion_run_id": ingestion_run_id,
+            "run_status": ingestion_run.run_status,
+            "records_found": ingestion_run.records_found,
+            "records_saved": ingestion_run.records_saved,
+            "duplicates_skipped": duplicates_skipped,
+            "download_failures": download_failures,
+        }
+    except Exception as error:
+        db.rollback()
+        ingestion_run = db.get(IngestionRun, ingestion_run_id)
+        if ingestion_run is not None:
+            ingestion_run.run_status = "failed"
+            ingestion_run.finished_at = datetime.now(timezone.utc)
+            ingestion_run.error_message = str(error)
+            db.commit()
+        raise
 
 
 def ingest_inspection_reports(
