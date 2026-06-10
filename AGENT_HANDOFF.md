@@ -11,7 +11,10 @@ Implemented the missing Railway/n8n ingestion API surface:
 - Added `x-api-key` protection using `INGESTION_API_KEY`.
 - Added exact source-document deduplication with text-block reassignment.
 - Added shared ingestion-run tracking and source-document persistence for API-triggered ingestion.
-- Added n8n-supplied JSON record ingestion for licensed/registered persons, annual reports, and FOIA logs.
+- Added truthful `source_behavior_pending` responses for licensed/registered
+  persons, annual reports, and FOIA logs.
+- Pending-source endpoints return zero metrics and a null ingestion run ID
+  without writing misleading ingestion-run rows.
 - Registered ingestion and maintenance routers in FastAPI.
 - Replaced the incorrectly named Railway `Profile` with `Procfile`.
 - Configured Railway startup to run `alembic upgrade head` before Uvicorn.
@@ -29,7 +32,7 @@ backend/app/core/config.py - added INGESTION_API_KEY setting
 backend/app/main.py - registered ingestion and maintenance routers
 backend/app/api/routes/ingestion.py - added summary and all requested ingestion endpoints with API-key protection
 backend/app/api/routes/maintenance.py - added exact source-document deduplication endpoint
-backend/app/services/ingestion/run_service.py - added shared eCFR, Federal Register, supplied-record persistence, dedupe, and ingestion-run logic
+backend/app/services/ingestion/run_service.py - added shared eCFR and Federal Register ingestion-run and persistence logic
 ```
 
 ## 3. Commands Run
@@ -57,6 +60,8 @@ git switch -c codex/add-ingestion-api-routes
 git add AGENT_HANDOFF.md command.md backend/Procfile backend/Profile backend/README.md backend/app/core/config.py backend/app/main.py backend/app/api/routes/ingestion.py backend/app/api/routes/maintenance.py backend/app/services/ingestion/run_service.py
 git commit -m "Add authenticated ingestion API routes"
 git push -u origin codex/add-ingestion-api-routes
+git commit -m "Return truthful pending source responses"
+git push
 ```
 
 API requests were executed with PowerShell `Invoke-WebRequest` and
@@ -136,7 +141,7 @@ Notes: Later phase. Should be designed for, but not implemented today.
 ```text
 eCFR sample collection completed.
 Records saved: 1
-Raw file saved at: storage\raw\ecfr\2026-06-10\ecfr_title_9_sample_20260610_110159.xml
+Raw file saved at: storage\raw\ecfr\2026-06-10\ecfr_title_9_sample_20260610_111345.xml
 ```
 
 ### `python scripts\collect_federal_register_sample.py`
@@ -145,7 +150,7 @@ Raw file saved at: storage\raw\ecfr\2026-06-10\ecfr_title_9_sample_20260610_1101
 Federal Register sample collection completed.
 Records found: 5
 Records saved: 5
-Raw file saved at: storage\raw\federal_register\2026-06-10\federal_register_animal_welfare_20260610_110210.json
+Raw file saved at: storage\raw\federal_register\2026-06-10\federal_register_animal_welfare_20260610_111353.json
 ```
 
 ### `python scripts\smoke_test_ingestion.py`
@@ -167,34 +172,34 @@ Tables existing in database:
   - ingestion_runs
   - source_documents
 
-Source documents: 9
-Ingestion runs: 17
+Source documents: 15
+Ingestion runs: 19
 Document text blocks: 0
 
 Documents by source:
   aphis_public_search_tool: 3
-  ecfr: 1
-  federal_register: 5
+  ecfr: 2
+  federal_register: 10
 
 Latest 5 source documents:
-  ID: 22 | Source: aphis_public_search_tool | Type: awa_enforcement_action | Title: APHIS enforcement action - Teresa Rauch - Decision and Order...
-  ID: 21 | Source: aphis_public_search_tool | Type: awa_inspection_report | Title: APHIS inspection report - Unknown facility (74-B-0410) - 202...
-  ID: 13 | Source: aphis_public_search_tool | Type: awa_inspection_report | Title: Manual APHIS Sample - Inspection Report...
-  ID: 2 | Source: federal_register | Type: Notice | Title: M15 General Principles for Model-Informed Drug Development; ...
-  ID: 3 | Source: federal_register | Type: Notice | Title: M11 Clinical Electronic Structured Harmonised Protocol (CeSH...
+  ID: 24 | Source: federal_register | Type: Notice | Title: M15 General Principles for Model-Informed Drug Development; ...
+  ID: 25 | Source: federal_register | Type: Notice | Title: M11 Clinical Electronic Structured Harmonised Protocol (CeSH...
+  ID: 26 | Source: federal_register | Type: Rule | Title: Visual Post-Mortem Inspection in Swine Slaughter Establishme...
+  ID: 27 | Source: federal_register | Type: Notice | Title: Takes of Marine Mammals Incidental to Specified Activities; ...
+  ID: 28 | Source: federal_register | Type: Proposed Rule | Title: Modification of Certain Terminology in Title 21...
 
 Ingestion runs by source:
   aphis_public_search_tool: 8
-  ecfr: 4
-  federal_register: 4
+  ecfr: 5
+  federal_register: 5
   foia_returns: 1
 
 Latest 5 ingestion runs:
+  ID: 19 | Source: federal_register | Status: success | Found: 5 | Saved: 5
+  ID: 18 | Source: ecfr | Status: success | Found: 1 | Saved: 1
   ID: 17 | Source: foia_returns | Status: success | Found: 0 | Saved: 0
   ID: 16 | Source: federal_register | Status: success | Found: 5 | Saved: 5
   ID: 15 | Source: ecfr | Status: success | Found: 1 | Saved: 1
-  ID: 14 | Source: aphis_public_search_tool | Status: success | Found: 1 | Saved: 0
-  ID: 13 | Source: aphis_public_search_tool | Status: success | Found: 1 | Saved: 1
 
 === Smoke Test Complete ===
 ```
@@ -206,6 +211,20 @@ INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
 INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
 ```
 
+### `python -m compileall app`
+
+```text
+Listing 'app'...
+Listing 'app\api'...
+Listing 'app\api\routes'...
+Listing 'app\core'...
+Listing 'app\models'...
+Listing 'app\schemas'...
+Listing 'app\services'...
+Listing 'app\services\ingestion'...
+Listing 'app\workers'...
+```
+
 ## 5. API Verification
 
 All required URLs worked locally:
@@ -215,10 +234,10 @@ All required URLs worked locally:
 Response: {"status":"ok","service":"awa-intelligence-api"}
 
 200 http://127.0.0.1:8000/documents
-Response count: 9
+Response count: 15
 
 200 http://127.0.0.1:8000/ingestion-runs
-Response count: 17
+Response count: 19
 
 200 http://127.0.0.1:8000/documents/1
 Response: eCFR source document ID 1 with full provenance metadata
@@ -234,12 +253,12 @@ It returned:
 
 ```json
 {
-  "total_documents": 9,
-  "total_ingestion_runs": 17,
+  "total_documents": 15,
+  "total_ingestion_runs": 19,
   "documents_by_source": {
     "aphis_public_search_tool": 3,
-    "ecfr": 1,
-    "federal_register": 5
+    "ecfr": 2,
+    "federal_register": 10
   },
   "storage_mode": "local"
 }
@@ -256,6 +275,24 @@ Authentication and maintenance verification:
 The maintenance run found 7 exact duplicate groups and deleted 19 duplicate
 rows. Distinct records were retained because the key includes source name,
 source type, source URL, and content hash.
+
+Pending-source response verification:
+
+```text
+401 POST pending endpoint without x-api-key
+
+POST /ingestion/aphis/licensed-registered-persons/run
+{"source_name":"aphis_public_search_tool","source_subtype":"licensed_registered_persons","status":"source_behavior_pending","records_found":0,"records_saved":0,"duplicates_skipped":0,"changed_records":0,"errors":[],"ingestion_run_id":null}
+
+POST /ingestion/aphis/annual-reports/run
+{"source_name":"aphis_public_search_tool","source_subtype":"annual_reports","status":"source_behavior_pending","records_found":0,"records_saved":0,"duplicates_skipped":0,"changed_records":0,"errors":[],"ingestion_run_id":null}
+
+POST /ingestion/foia/logs/run
+{"source_name":"foia_returns","source_subtype":"logs","status":"source_behavior_pending","records_found":0,"records_saved":0,"duplicates_skipped":0,"changed_records":0,"errors":[],"ingestion_run_id":null}
+
+Ingestion run count before pending calls: 17
+Ingestion run count after pending calls: 17
+```
 
 ## 6. Errors or Failed Items
 
@@ -286,9 +323,8 @@ succeed.
 - Set `INGESTION_API_KEY` in Railway and n8n secrets.
 - Confirm Railway uses `backend` as its root directory so `backend/Procfile`
   is discovered.
-- Licensed/registered-person, annual-report, and FOIA endpoints currently
-  preserve records supplied by n8n; autonomous remote collectors for those
-  sources remain future work.
+- Licensed/registered-person, annual-report, and FOIA endpoints intentionally
+  report `source_behavior_pending`; autonomous collectors remain future work.
 - Move raw source storage from the local filesystem to durable object storage.
 - OCR, frontend, AI, Neo4j, Dagster, and Celery were intentionally not built.
 

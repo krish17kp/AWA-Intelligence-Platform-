@@ -1,5 +1,4 @@
 import secrets
-from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -17,7 +16,6 @@ from app.services.ingestion.aphis_adapter import (
 from app.services.ingestion.run_service import (
     run_ecfr_ingestion,
     run_federal_register_ingestion,
-    run_supplied_records_ingestion,
 )
 
 router = APIRouter(prefix="/ingestion", tags=["ingestion"])
@@ -63,8 +61,22 @@ class AphisEnforcementRunRequest(BaseModel):
     headless: bool = True
 
 
-class SuppliedRecordsRunRequest(BaseModel):
-    records: list[dict[str, Any]] = Field(default_factory=list)
+def pending_source_response(
+    *,
+    source_name: str,
+    source_subtype: str,
+) -> dict:
+    return {
+        "source_name": source_name,
+        "source_subtype": source_subtype,
+        "status": "source_behavior_pending",
+        "records_found": 0,
+        "records_saved": 0,
+        "duplicates_skipped": 0,
+        "changed_records": 0,
+        "errors": [],
+        "ingestion_run_id": None,
+    }
 
 
 @router.get("/summary")
@@ -180,16 +192,10 @@ def run_aphis_enforcement_actions(
     dependencies=[Depends(require_ingestion_api_key)],
 )
 def run_aphis_licensed_registered_persons(
-    request: SuppliedRecordsRunRequest | None = None,
-    db: Session = Depends(get_db),
 ):
-    request = request or SuppliedRecordsRunRequest()
-    return run_supplied_records_ingestion(
-        db,
+    return pending_source_response(
         source_name="aphis_public_search_tool",
-        source_type="licensed_registered_person",
-        source_url="https://aphis.my.site.com/PublicSearchTool/s/",
-        records=request.records,
+        source_subtype="licensed_registered_persons",
     )
 
 
@@ -198,16 +204,10 @@ def run_aphis_licensed_registered_persons(
     dependencies=[Depends(require_ingestion_api_key)],
 )
 def run_aphis_annual_reports(
-    request: SuppliedRecordsRunRequest | None = None,
-    db: Session = Depends(get_db),
 ):
-    request = request or SuppliedRecordsRunRequest()
-    return run_supplied_records_ingestion(
-        db,
+    return pending_source_response(
         source_name="aphis_public_search_tool",
-        source_type="awa_annual_report",
-        source_url="https://aphis.my.site.com/PublicSearchTool/s/annual-reports",
-        records=request.records,
+        source_subtype="annual_reports",
     )
 
 
@@ -216,14 +216,8 @@ def run_aphis_annual_reports(
     dependencies=[Depends(require_ingestion_api_key)],
 )
 def run_foia_logs(
-    request: SuppliedRecordsRunRequest | None = None,
-    db: Session = Depends(get_db),
 ):
-    request = request or SuppliedRecordsRunRequest()
-    return run_supplied_records_ingestion(
-        db,
+    return pending_source_response(
         source_name="foia_returns",
-        source_type="foia_log",
-        source_url="urn:awa-intelligence:foia-logs",
-        records=request.records,
+        source_subtype="logs",
     )

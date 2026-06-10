@@ -1,40 +1,41 @@
-Fix the missing ingestion API routes for Railway/n8n.
+Fix missing ingestion API routes for Railway/n8n.
 
-Current issue:
-GET /ingestion/summary returns 404 on Railway.
-GET /ingestion-runs works only after DB migrations.
+Current Railway result:
+GET /ingestion/summary returns {"detail":"Not Found"}.
 
 Tasks:
 
-1. Create backend/app/api/routes/ingestion.py.
-2. Add GET /ingestion/summary.
-3. Add POST endpoints:
-   - /ingestion/ecfr/run
-   - /ingestion/federal-register/run
-   - /ingestion/aphis/inspection-reports/run
-   - /ingestion/aphis/enforcement-actions/run
-   - /ingestion/aphis/licensed-registered-persons/run
-   - /ingestion/aphis/annual-reports/run
-   - /ingestion/foia/logs/run
-4. Protect all POST ingestion endpoints with x-api-key using INGESTION_API_KEY.
-5. Register ingestion router in app/main.py.
-6. Add maintenance route:
-   - POST /maintenance/dedupe-source-documents
-7. Register maintenance router in app/main.py.
-8. GET /ingestion/summary should return:
+1. Create `backend/app/api/routes/ingestion.py`.
+2. Add `router = APIRouter(prefix="/ingestion", tags=["ingestion"])`.
+3. Add `GET /ingestion/summary` returning:
    - total_documents
    - total_ingestion_runs
    - documents_by_source
    - latest_ingestion_runs
    - storage_mode
-9. Make sure the app starts on Railway.
-10. Do not build frontend, AI, Neo4j, Dagster, or Celery.
+4. Add POST endpoints:
+   - `/ingestion/ecfr/run`
+   - `/ingestion/federal-register/run`
+   - `/ingestion/aphis/inspection-reports/run`
+   - `/ingestion/aphis/enforcement-actions/run`
+   - `/ingestion/aphis/licensed-registered-persons/run`
+   - `/ingestion/aphis/annual-reports/run`
+   - `/ingestion/foia/logs/run`
+5. Sources without implemented behavior must return truthful
+   `source_behavior_pending` JSON with zero counts, no errors, and a null
+   ingestion run ID.
+6. Connect implemented endpoints to existing APHIS, eCFR, and Federal Register
+   ingestion logic.
+7. Protect every POST endpoint with `x-api-key` compared to
+   `settings.ingestion_api_key`.
+8. Add `ingestion_api_key` to config if missing.
+9. Register the ingestion router in `app/main.py`.
+10. Create and register `backend/app/api/routes/maintenance.py`.
+11. Add `POST /maintenance/dedupe-source-documents`.
+12. Run `python -m compileall app`.
+13. Commit and push.
 
-After changes:
-
-- commit
-- push
-- Railway redeploys
+Do not build frontend, AI, Neo4j, Dagster, or Celery.
 
 ## Required Handoff Report After Implementation
 

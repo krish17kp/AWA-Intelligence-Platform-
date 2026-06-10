@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -6,12 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.models.ingestion_run import IngestionRun
 from app.models.source_document import SourceDocument
-from app.services.hashing_service import sha256_bytes
 from app.services.ingestion.ecfr_adapter import fetch_ecfr_title_9_sample
 from app.services.ingestion.federal_register_adapter import (
     fetch_federal_register_animal_welfare_records,
 )
-from app.services.storage_service import save_raw_bytes
 
 
 def _parse_date(value: Any) -> datetime | None:
@@ -201,117 +198,6 @@ def run_federal_register_ingestion(
                 run,
                 status="failed",
                 records_found=0,
-                records_saved=0,
-                error_message=str(error),
-            )
-        raise
-
-
-def run_supplied_records_ingestion(
-    db: Session,
-    *,
-    source_name: str,
-    source_type: str,
-    source_url: str,
-    records: list[dict[str, Any]],
-) -> dict[str, Any]:
-    run = _start_run(db, source_name)
-    run_id = run.id
-    try:
-        if not records:
-            _finish_run(
-                db,
-                run,
-                status="success",
-                records_found=0,
-                records_saved=0,
-            )
-            return {
-                "ingestion_run_id": run_id,
-                "run_status": "success",
-                "records_found": 0,
-                "records_saved": 0,
-                "duplicates_skipped": 0,
-            }
-
-        retrieved_at = datetime.now(timezone.utc)
-        raw_content = json.dumps(
-            records,
-            ensure_ascii=True,
-            sort_keys=True,
-            default=str,
-        ).encode("utf-8")
-        content_hash = sha256_bytes(raw_content)
-        timestamp = retrieved_at.strftime("%Y%m%d_%H%M%S")
-        storage_path = save_raw_bytes(
-            source_name=source_name,
-            filename=f"{source_type}_{timestamp}_{content_hash[:12]}.json",
-            content=raw_content,
-        )
-        saved = 0
-
-        for index, record in enumerate(records):
-            record_url = (
-                record.get("source_url")
-                or record.get("url")
-                or record.get("reportLink")
-                or f"{source_url}#record-{index + 1}"
-            )
-            if _document_exists(
-                db,
-                source_name=source_name,
-                source_url=record_url,
-                content_hash=content_hash,
-            ):
-                continue
-
-            db.add(
-                SourceDocument(
-                    source_name=source_name,
-                    source_type=source_type,
-                    source_url=record_url,
-                    document_title=record.get("title")
-                    or record.get("name")
-                    or record.get("document_title"),
-                    document_date=_parse_date(
-                        record.get("document_date")
-                        or record.get("date")
-                        or record.get("publication_date")
-                    ),
-                    retrieved_at=retrieved_at,
-                    content_hash=content_hash,
-                    storage_path=storage_path,
-                    mime_type="application/json",
-                    file_size_bytes=len(raw_content),
-                    raw_metadata_json=record,
-                )
-            )
-            saved += 1
-
-        db.commit()
-        _finish_run(
-            db,
-            run,
-            status="success",
-            records_found=len(records),
-            records_saved=saved,
-        )
-        return {
-            "ingestion_run_id": run_id,
-            "run_status": "success",
-            "records_found": len(records),
-            "records_saved": saved,
-            "duplicates_skipped": len(records) - saved,
-        }
-    except Exception as error:
-        db.rollback()
-        run = db.get(IngestionRun, run_id)
-        if run is not None:
-            _finish_run(
-                db,
-                run,
-                status="failed",
-                records_found=len(records),
                 records_saved=0,
                 error_message=str(error),
             )
