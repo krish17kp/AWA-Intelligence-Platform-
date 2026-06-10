@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+backend/.venv/
+
+# Environment/secrets
+.env
+*.env
+backend/.env
+
+# Local databases
+*.db
+local.db
+backend/local.db
+
+# Raw downloaded files / evidence files
+backend/storage/raw/
+
+# Old reference project - do not push
+old/
+
+# Logs
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Node/frontend later
+node_modules/
+dist/
+build/
