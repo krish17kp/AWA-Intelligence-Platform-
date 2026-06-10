@@ -81,6 +81,9 @@ Use `--max-pages 0` for all available pages. The command prints JSON so n8n
 can execute it and capture the ingestion result. Raw PDFs are validated,
 hashed, deduplicated, and saved under:
 
+For controlled test batches, use `--max-facilities-per-page` and
+`--max-documents`. A value of `0` means no limit.
+
 ```text
 storage/raw/aphis_public_search_tool/YYYY-MM-DD/
 ```

@@ -66,7 +66,13 @@ def parse_aphis_date(value: Any) -> datetime | None:
 
 def _record_title(record: dict[str, Any], document_date: datetime | None) -> str:
     facility_name = (
-        str(record.get("customerName") or record.get("accountName") or "").strip()
+        str(
+            record.get("siteName")
+            or record.get("legalName")
+            or record.get("customerName")
+            or record.get("accountName")
+            or ""
+        ).strip()
         or "Unknown facility"
     )
     certificate = str(record.get("certNumber") or "").strip()
@@ -85,6 +91,8 @@ def _extract_records_from_aura_payload(body: str) -> list[dict[str, Any]]:
         if action.get("state") != "SUCCESS":
             continue
         return_value = action.get("returnValue") or {}
+        if not isinstance(return_value, dict):
+            continue
         results = return_value.get("results")
         if not isinstance(results, list):
             continue
@@ -100,6 +108,8 @@ def discover_inspection_reports(
     state_code: str = "TX",
     license_type: str | None = None,
     max_pages: int = 1,
+    max_facilities_per_page: int = 0,
+    max_documents: int = 0,
     headless: bool = True,
 ) -> list[dict[str, Any]]:
     try:
@@ -139,23 +149,43 @@ def discover_inspection_reports(
             page.goto(INSPECTION_REPORTS_URL, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(5000)
 
-            state_dropdown = page.locator('button[aria-label="State"]')
-            if state_dropdown.count() == 0:
+            state_select = page.get_by_label("State", exact=True)
+            if state_select.count() == 0:
                 raise RuntimeError("APHIS State filter was not found")
-            state_dropdown.click()
-            page.locator(
-                f'lightning-base-combobox-item[data-value="{state_code}"]'
-            ).click()
+            state_option = state_select.locator(
+                f'option:text-matches("\\\\({state_code}\\\\)$", "i")'
+            )
+            if state_option.count() == 0:
+                raise ValueError(f"APHIS does not list state code {state_code}")
+            state_select.select_option(value=state_option.first.get_attribute("value"))
 
             if license_type:
-                type_dropdown = page.locator('button[aria-label="Certificate Type"]')
-                if type_dropdown.count() == 0:
+                type_select = page.get_by_label(
+                    "License/Registration Type", exact=True
+                )
+                if type_select.count() == 0:
                     raise RuntimeError("APHIS Certificate Type filter was not found")
-                type_dropdown.click()
-                page.locator(
-                    "lightning-base-combobox-item"
-                    f'[data-value="{license_type}"]'
-                ).click()
+                option_values = type_select.locator("option").evaluate_all(
+                    """(options) => options.map((option) => ({
+                      value: option.value,
+                      label: option.textContent.trim()
+                    }))"""
+                )
+                requested = license_type.strip().casefold()
+                selected = next(
+                    (
+                        option["value"]
+                        for option in option_values
+                        if option["value"].casefold() == requested
+                        or option["label"].casefold() == requested
+                    ),
+                    None,
+                )
+                if not selected:
+                    raise ValueError(
+                        f"APHIS does not list license/registration type {license_type}"
+                    )
+                type_select.select_option(value=selected)
 
             search_button = page.locator('button:has-text("Search")')
             if search_button.count() == 0:
@@ -165,24 +195,36 @@ def discover_inspection_reports(
 
             current_page = 1
             while True:
+                query_button_count = page.locator(
+                    'button[title="Query Inspection Reports"]'
+                ).count()
+                if max_facilities_per_page > 0:
+                    query_button_count = min(
+                        query_button_count, max_facilities_per_page
+                    )
+
                 page.evaluate(
                     """
-                    const buttons = Array.from(
+                    ({limit}) => {
+                      const buttons = Array.from(
                       document.querySelectorAll(
                         'button[title="Query Inspection Reports"]'
                       )
-                    );
-                    buttons.forEach((button, index) => {
-                      setTimeout(() => button.click(), index * 750);
-                    });
+                      ).slice(0, limit);
+                      buttons.forEach((button, index) => {
+                        setTimeout(() => button.click(), index * 500);
+                      });
+                    }
                     """
+                    ,
+                    {"limit": query_button_count},
                 )
-                page.wait_for_timeout(15000)
+                page.wait_for_timeout(max(10000, query_button_count * 500 + 5000))
 
                 if max_pages > 0 and current_page >= max_pages:
                     break
 
-                next_button = page.locator('button[title="Next Page"]')
+                next_button = page.get_by_role("button", name=">", exact=True)
                 if next_button.count() == 0 or next_button.first.is_disabled():
                     break
                 next_button.first.click()
@@ -200,7 +242,10 @@ def discover_inspection_reports(
         if HASH_RE.fullmatch(source_id):
             unique_records[source_id] = record
 
-    return list(unique_records.values())
+    records = list(unique_records.values())
+    if max_documents > 0:
+        return records[:max_documents]
+    return records
 
 
 def ingest_inspection_reports(
@@ -208,6 +253,8 @@ def ingest_inspection_reports(
     state_code: str = "TX",
     license_type: str | None = None,
     max_pages: int = 1,
+    max_facilities_per_page: int = 0,
+    max_documents: int = 0,
     headless: bool = True,
 ) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc)
@@ -231,6 +278,8 @@ def ingest_inspection_reports(
             state_code=state_code,
             license_type=license_type,
             max_pages=max_pages,
+            max_facilities_per_page=max_facilities_per_page,
+            max_documents=max_documents,
             headless=headless,
         )
         ingestion_run.records_found = len(records)

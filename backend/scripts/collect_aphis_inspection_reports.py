@@ -24,6 +24,18 @@ def parse_args() -> argparse.Namespace:
         help="Pages to collect. Use 0 for all available pages.",
     )
     parser.add_argument(
+        "--max-facilities-per-page",
+        type=int,
+        default=0,
+        help="Facility query buttons per page. Use 0 for all facilities.",
+    )
+    parser.add_argument(
+        "--max-documents",
+        type=int,
+        default=0,
+        help="PDFs to preserve per run. Use 0 for all discovered PDFs.",
+    )
+    parser.add_argument(
         "--headed",
         action="store_true",
         help="Show the Chromium browser while collecting.",
@@ -40,6 +52,8 @@ def main() -> int:
             state_code=args.state,
             license_type=args.license_type,
             max_pages=args.max_pages,
+            max_facilities_per_page=args.max_facilities_per_page,
+            max_documents=args.max_documents,
             headless=not args.headed,
         )
         print(json.dumps(result, indent=2))
