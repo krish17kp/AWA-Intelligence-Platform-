@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.api.routes import documents, health, ingestion_runs
+from app.api.routes import documents, health, ingestion, ingestion_runs, maintenance
 from app.core.config import settings
 
 app = FastAPI(
@@ -11,6 +11,8 @@ app = FastAPI(
 app.include_router(health.router)
 app.include_router(documents.router)
 app.include_router(ingestion_runs.router)
+app.include_router(ingestion.router)
+app.include_router(maintenance.router)
 
 
 @app.get("/")

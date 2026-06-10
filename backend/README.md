@@ -108,6 +108,12 @@ uvicorn app.main:app --reload
 
 Server runs at: `http://127.0.0.1:8000`
 
+Set an ingestion API key before calling POST ingestion or maintenance routes:
+
+```powershell
+$env:INGESTION_API_KEY = "replace-with-a-secret"
+```
+
 ### API Endpoints
 
 | Endpoint | Method | Description |
@@ -116,6 +122,9 @@ Server runs at: `http://127.0.0.1:8000`
 | `/documents` | GET | List documents (supports `source_name` filter, `limit` param) |
 | `/documents/{id}` | GET | Get document detail |
 | `/ingestion-runs` | GET | List ingestion runs |
+| `/ingestion/summary` | GET | Ingestion totals, source counts, and latest runs |
+| `/ingestion/*/run` | POST | Run or receive source ingestion; requires `x-api-key` |
+| `/maintenance/dedupe-source-documents` | POST | Remove exact duplicate source-document rows; requires `x-api-key` |
 
 Example queries:
 ```

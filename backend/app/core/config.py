@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./local.db"
     raw_storage_mode: str = "local"
     raw_storage_root: str = "storage/raw"
+    ingestion_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
