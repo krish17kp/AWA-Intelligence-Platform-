@@ -235,3 +235,96 @@ After deploying to Railway:
 
 - Railway S3 endpoint URL must be verified against actual Railway-provided bucket values.
 - Existing `source_documents` rows have `canonical_key=NULL` — only new records get canonical_key set.
+
+---
+
+## 8. Production Data-Quality Fixes (June 12 — 3rd pass)
+
+### Files changed
+
+| Action | File |
+|--------|------|
+| Created | `backend/app/services/extraction_service.py` — PDF/XML/JSON text extraction |
+| Created | `backend/app/api/routes/extraction.py` — `POST /extraction/backfill/run` endpoint |
+| Created | `backend/scripts/backfill_text_extraction.py` — local backfill script |
+| Modified | `backend/app/services/storage_service.py` — added `read_raw_bytes()`, `_parse_s3_path()` |
+| Modified | `backend/app/services/ingestion/aphis_adapter.py` — wired extraction after save; added `source_type` to response |
+| Modified | `backend/app/services/ingestion/run_service.py` — wired extraction after save; added `source_type` to response |
+| Modified | `backend/app/api/routes/ingestion.py` — changed APHIS defaults to 0 (unlimited); added `source_type` to pending response |
+| Modified | `backend/app/main.py` — registered extraction router |
+| Modified | `backend/requirements.txt` — added `pypdf` |
+
+### Task-by-task summary
+
+**Task 1 — APHIS pagination:** Changed `AphisInspectionRunRequest` and `AphisEnforcementRunRequest` defaults from `max_pages=1, max_facilities_per_page=10, max_documents=25` to `0` (no limit). These are now safety guardrails only. Default production behavior attempts full discovery.
+
+**Task 2 — Text extraction:** Created `extraction_service.py` with `extract_text_blocks()` and `backfill_text_extraction()`. Supports PDF (via pypdf), XML, JSON, and fallback text. Calls are idempotent (skips if blocks exist). Confidence=1.0 for embedded text. Wired into all 4 ingestion adapters (aphis inspection, aphis enforcement, ecfr, federal register) so new documents get text blocks on save.
+
+**Task 3 — Storage read:** Added `read_raw_bytes(storage_path, fallback_url)` to `storage_service.py`. Supports S3 (`s3://bucket/key`), local filesystem, and HTTP fallback to `source_url`.
+
+**Task 4 — Backfill endpoint:** `POST /extraction/backfill/run` at path `/extraction/backfill/run`. Protected by `x-api-key`. Returns `documents_checked`, `documents_extracted`, `documents_skipped`, `text_blocks_created`, `errors[]`.
+
+**Task 5 — Backfill script:** `scripts/backfill_text_extraction.py` runs the same logic locally.
+
+**Task 6 — Enforcement repeated-run:** Already working via canonical_key dedup. Defaults now unlimited (`max_pages=0`) so re-discovery covers all pages. Second run returns `records_found=N, records_saved=0, duplicates_skipped=N`.
+
+**Task 7 — Naming consistency:** All POST ingestion responses now include both `source_type` and `source_subtype` with the same value. Existing n8n workflows reading `source_subtype` are unbroken.
+
+**Task 8 — Requirements:** `pypdf` added.
+
+### Commands run
+
+```powershell
+cd backend
+python -m compileall -q app scripts
+```
+Output: `COMPILE OK`
+
+```powershell
+python scripts\backfill_text_extraction.py
+```
+Output (second run — first run extracted 13, this run backfills remaining 2 APHIS PDFs):
+```json
+{
+  "status": "success",
+  "documents_checked": 15,
+  "documents_extracted": 2,
+  "documents_skipped": 13,
+  "text_blocks_created": 12,
+  "errors": []
+}
+```
+
+### Smoke test after backfill
+
+```
+Document text blocks: 25
+```
+
+### How to verify after Railway deploy
+
+1. Post-deploy, run backfill:
+```powershell
+POST /extraction/backfill/run
+x-api-key: ...
+```
+
+2. Check text blocks:
+```sql
+SELECT COUNT(*) AS total_text_blocks FROM document_text_blocks;
+```
+Expected: > 0.
+
+3. Verify repeated APHIS runs return `duplicates_skipped > 0`:
+
+```text
+1st POST /ingestion/aphis/inspection-reports/run → records_saved=N
+2nd POST /ingestion/aphis/inspection-reports/run → duplicates_skipped=N, records_saved=0
+```
+
+4. Verify `source_type` appears alongside `source_subtype` in all POST ingestion responses.
+
+### Remaining blockers
+
+- APHIS inspection per-facility report pagination (within-facility Aura response may have its own pagination token). Current scraper captures what the "Query Inspection Reports" button returns per facility on the visible page.
+- Railway S3 endpoint URL must be verified against actual Railway-provided bucket values.

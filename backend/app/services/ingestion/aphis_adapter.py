@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models.ingestion_run import IngestionRun
 from app.models.source_document import SourceDocument
+from app.services.extraction_service import extract_text_blocks
 from app.services.hashing_service import sha256_bytes
 from app.services.pdf_download_service import download_pdf_bytes
 from app.services.storage_service import save_raw_bytes
@@ -394,28 +395,35 @@ def ingest_enforcement_actions(
                 content=content,
             )
 
-            db.add(
-                SourceDocument(
-                    source_name=SOURCE_NAME,
-                    source_type="awa_enforcement_action",
-                    source_url=source_url,
-                    document_title=title,
-                    document_date=document_date,
-                    retrieved_at=datetime.now(timezone.utc),
-                    content_hash=content_hash,
-                    storage_path=storage_path,
-                    mime_type="application/pdf",
-                    file_size_bytes=len(content),
-                    canonical_key=canonical_key,
-                    raw_metadata_json={
-                        **record,
-                        "record_type": "enforcement_action",
-                        "collection_method": "playwright_html_table",
-                        "source_record_id": source_id,
-                    },
-                )
+            doc = SourceDocument(
+                source_name=SOURCE_NAME,
+                source_type="awa_enforcement_action",
+                source_url=source_url,
+                document_title=title,
+                document_date=document_date,
+                retrieved_at=datetime.now(timezone.utc),
+                content_hash=content_hash,
+                storage_path=storage_path,
+                mime_type="application/pdf",
+                file_size_bytes=len(content),
+                canonical_key=canonical_key,
+                raw_metadata_json={
+                    **record,
+                    "record_type": "enforcement_action",
+                    "collection_method": "playwright_html_table",
+                    "source_record_id": source_id,
+                },
             )
+            db.add(doc)
             db.commit()
+            db.refresh(doc)
+            extract_text_blocks(
+                db,
+                source_document_id=doc.id,
+                mime_type="application/pdf",
+                storage_path=storage_path,
+                fallback_url=source_url,
+            )
             ingestion_run.records_saved += 1
 
         ingestion_run.run_status = (
@@ -425,6 +433,7 @@ def ingest_enforcement_actions(
         db.commit()
         return {
             "source_name": SOURCE_NAME,
+            "source_type": "enforcement_actions",
             "source_subtype": "enforcement_actions",
             "status": ingestion_run.run_status,
             "records_found": ingestion_run.records_found,
@@ -516,31 +525,38 @@ def ingest_inspection_reports(
             retrieved_at = datetime.now(timezone.utc)
             document_date = parse_aphis_date(record.get("inspectionDate"))
 
-            db.add(
-                SourceDocument(
-                    source_name=SOURCE_NAME,
-                    source_type=SOURCE_TYPE,
-                    source_url=source_url,
-                    document_title=_record_title(record, document_date),
-                    document_date=document_date,
-                    retrieved_at=retrieved_at,
-                    content_hash=content_hash,
-                    storage_path=storage_path,
-                    mime_type="application/pdf",
-                    file_size_bytes=len(content),
-                    canonical_key=canonical_key,
-                    raw_metadata_json={
-                        **record,
-                        "record_type": "inspection_report",
-                        "collection_method": "playwright_aura_interception",
-                        "state_filter": state_code.upper(),
-                        "license_type_filter": license_type,
-                        "source_record_id": source_id,
-                        "raw_report_link": raw_link,
-                    },
-                )
+            doc = SourceDocument(
+                source_name=SOURCE_NAME,
+                source_type=SOURCE_TYPE,
+                source_url=source_url,
+                document_title=_record_title(record, document_date),
+                document_date=document_date,
+                retrieved_at=retrieved_at,
+                content_hash=content_hash,
+                storage_path=storage_path,
+                mime_type="application/pdf",
+                file_size_bytes=len(content),
+                canonical_key=canonical_key,
+                raw_metadata_json={
+                    **record,
+                    "record_type": "inspection_report",
+                    "collection_method": "playwright_aura_interception",
+                    "state_filter": state_code.upper(),
+                    "license_type_filter": license_type,
+                    "source_record_id": source_id,
+                    "raw_report_link": raw_link,
+                },
             )
+            db.add(doc)
             db.commit()
+            db.refresh(doc)
+            extract_text_blocks(
+                db,
+                source_document_id=doc.id,
+                mime_type="application/pdf",
+                storage_path=storage_path,
+                fallback_url=source_url,
+            )
             ingestion_run.records_saved += 1
 
         ingestion_run.run_status = (
@@ -551,6 +567,7 @@ def ingest_inspection_reports(
 
         return {
             "source_name": SOURCE_NAME,
+            "source_type": "inspection_reports",
             "source_subtype": "inspection_reports",
             "status": ingestion_run.run_status,
             "records_found": ingestion_run.records_found,

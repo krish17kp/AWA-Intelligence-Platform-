@@ -103,6 +103,7 @@ All POST ingestion endpoints require the `INGESTION_API_KEY` in the `x-api-key` 
 | `/ingestion/ecfr/run` | POST | eCFR API | Fetches Title 9 XML from eCFR versioner API |
 | `/ingestion/federal-register/run` | POST | Federal Register API | Fetches AWA/APHIS-related Federal Register documents |
 | `/ingestion/foia/logs/run` | POST | FOIA | Not yet implemented — returns `source_behavior_pending` |
+| `/extraction/backfill/run` | POST | — | Backfill text extraction for existing documents without text blocks |
 | `/maintenance/dedupe-source-documents` | POST | — | Removes exact duplicate source document rows |
 
 ### Response Contract (POST ingestion endpoints)
@@ -110,6 +111,7 @@ All POST ingestion endpoints require the `INGESTION_API_KEY` in the `x-api-key` 
 ```json
 {
   "source_name": "string",
+  "source_type": "string",
   "source_subtype": "string",
   "status": "success | partial_success | source_behavior_pending | failed",
   "records_found": 0,
@@ -170,6 +172,66 @@ python scripts\test_storage_backend.py
 python scripts\smoke_test_ingestion.py
 ```
 
+## Text Extraction
+
+When a new source document is saved (via ingestion endpoints), text is automatically extracted into the `document_text_blocks` table:
+
+- **PDF files**: Extracted page-by-page using `pypdf`. One block per page with `confidence=1.0`.
+- **XML files**: Parsed with `xml.etree.ElementTree`, all text content extracted.
+- **JSON files**: Pretty-printed and stored.
+- Extraction is idempotent — re-running does not duplicate text blocks.
+
+### Backfill for existing documents
+
+To extract text for documents saved before extraction was wired:
+
+**Via API:**
+```powershell
+POST /extraction/backfill/run
+x-api-key: YOUR_KEY
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "documents_checked": 37,
+  "documents_extracted": 35,
+  "documents_skipped": 2,
+  "text_blocks_created": 120,
+  "errors": []
+}
+```
+
+**Via local script:**
+```powershell
+python scripts\backfill_text_extraction.py
+```
+
+### Verify text blocks
+
+```sql
+SELECT COUNT(*) AS total_text_blocks FROM document_text_blocks;
+```
+
+Expected: > 0 after backfill.
+
+## APHIS Ingestion Notes
+
+### Pagination
+
+APHIS defaults are now unlimited (`max_pages=0`, `max_facilities_per_page=0`, `max_documents=0`). These are safety guardrails — n8n can pass explicit values to limit scope.
+
+### Enforcement repeated-run behavior
+
+When APHIS enforcement runs again:
+- `records_found` = number of rediscovered enforcement records
+- `records_saved` = 0 (all already saved)
+- `duplicates_skipped` > 0
+- This is correct — the endpoint finds the same records and skips them as duplicates.
+
+If the APHIS source page is unavailable, the endpoint returns a clear error rather than silent success with `records_found=0`.
+
 ## Project Structure
 
 ```
@@ -179,8 +241,9 @@ backend/
     core/               # Config, database
     models/             # SQLAlchemy models
     schemas/            # Pydantic schemas
-    services/           # Business logic
-      ingestion/        # Source adapters (APHIS, eCFR, Federal Register)
+services/           # Business logic
+    extraction/       # Text extraction (PDF/XML/JSON)
+    ingestion/        # Source adapters (APHIS, eCFR, Federal Register)
   scripts/              # Runnable scripts
   storage/raw/          # Raw source file storage (local mode only)
   alembic/              # Database migrations

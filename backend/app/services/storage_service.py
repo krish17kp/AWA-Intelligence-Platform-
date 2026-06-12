@@ -69,3 +69,51 @@ def _save_local(source_name: str, filename: str, content: bytes) -> str:
     file_path.write_bytes(content)
 
     return str(file_path)
+
+
+def _parse_s3_path(storage_path: str) -> tuple[str, str] | None:
+    if not storage_path.startswith("s3://"):
+        return None
+    without_prefix = storage_path[5:]
+    slash_idx = without_prefix.find("/")
+    if slash_idx == -1:
+        return None
+    bucket = without_prefix[:slash_idx]
+    key = without_prefix[slash_idx + 1:]
+    return bucket, key
+
+
+def read_raw_bytes(storage_path: str, fallback_url: str | None = None) -> bytes | None:
+    if storage_path.startswith("s3://"):
+        parsed = _parse_s3_path(storage_path)
+        if parsed:
+            bucket, key = parsed
+            try:
+                import boto3
+                client = boto3.client(
+                    "s3",
+                    endpoint_url=settings.s3_endpoint_url,
+                    aws_access_key_id=settings.aws_access_key_id,
+                    aws_secret_access_key=settings.aws_secret_access_key,
+                    region_name=settings.aws_default_region or "us-east-1",
+                )
+                obj = client.get_object(Bucket=bucket, Key=key)
+                return obj["Body"].read()
+            except Exception as exc:
+                logger.warning("S3 read failed for %s: %s", storage_path, exc)
+
+    local = Path(storage_path)
+    if local.exists():
+        return local.read_bytes()
+
+    if fallback_url:
+        try:
+            import requests
+            resp = requests.get(fallback_url, timeout=30)
+            resp.raise_for_status()
+            logger.info("Fell back to downloading from %s", fallback_url)
+            return resp.content
+        except Exception as exc:
+            logger.warning("Fallback download failed for %s: %s", fallback_url, exc)
+
+    return None

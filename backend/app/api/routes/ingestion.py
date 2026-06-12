@@ -49,15 +49,15 @@ class FederalRegisterRunRequest(BaseModel):
 class AphisInspectionRunRequest(BaseModel):
     state_code: str = Field(default="TX", min_length=2, max_length=2)
     license_type: str | None = None
-    max_pages: int = Field(default=1, ge=0)
-    max_facilities_per_page: int = Field(default=10, ge=0)
-    max_documents: int = Field(default=25, ge=0)
+    max_pages: int = Field(default=0, ge=0)
+    max_facilities_per_page: int = Field(default=0, ge=0)
+    max_documents: int = Field(default=0, ge=0)
     headless: bool = True
 
 
 class AphisEnforcementRunRequest(BaseModel):
-    max_pages: int = Field(default=1, ge=0)
-    max_documents: int = Field(default=25, ge=0)
+    max_pages: int = Field(default=0, ge=0)
+    max_documents: int = Field(default=0, ge=0)
     headless: bool = True
 
 
@@ -68,6 +68,7 @@ def pending_source_response(
 ) -> dict:
     return {
         "source_name": source_name,
+        "source_type": source_subtype,
         "source_subtype": source_subtype,
         "status": "source_behavior_pending",
         "records_found": 0,

@@ -1,167 +1,241 @@
 Before making any changes, read `command.md` fully.
 
-Fix Railway Playwright/Chromium deployment using Dockerfile.
+We have completed Railway + n8n production ingestion verification. Now fix the remaining production data-quality issues.
 
-Current problem:
-Railway APHIS ingestion fails with:
+Current verified production state:
 
-`BrowserType.launch: Executable doesn't exist at /root/.cache/ms-playwright/.../chrome-headless-shell`
-`Please run: playwright install`
+- `source_documents` has 37 records.
+- Counts:
+  - `aphis_public_search_tool / awa_enforcement_action = 10`
+  - `aphis_public_search_tool / awa_inspection_report = 25`
+  - `ecfr / regulatory_citation_mapping = 1`
+  - `federal_register / Rule = 1`
 
-Railway build logs currently show:
+- Railway Bucket stores raw files under:
+  - `sources/aphis_public_search_tool/`
+  - `sources/ecfr/`
+  - `sources/federal_register/`
 
-- `using build driver railpack-v0.27.0`
-- `Found web command in Procfile`
-- `pip install -r requirements.txt`
-- Chromium browser binaries are not installed.
+- Missing metadata check is clean:
+  - missing source_url = 0
+  - missing storage_path = 0
+  - missing content_hash = 0
+  - missing file_size = 0
 
-This means the Python `playwright` package is installed, but the actual Chromium browser is missing.
+- Duplicate checks are clean:
+  - duplicate canonical_key = 0
+  - duplicate content_hash = 0
+  - documents without canonical_key = 0
 
-Goal:
-Use a Dockerfile-based Railway deployment so Chromium and browser system dependencies are available in production.
+- Problem: `document_text_blocks` is still empty:
+  - `SELECT COUNT(*) FROM document_text_blocks;` returns `0`
 
-Important project path:
-Railway Root Directory is `backend`, so Dockerfile must be created at:
+- Problem: APHIS Public Search Tool manually shows 29 inspection rows for Equitech-Bio Inc. certificate `74-B-0345`, but production has only 25 inspection reports total and only a partial subset for Equitech.
+- Problem: APHIS enforcement saved 10 records, but repeated verification later may return `records_found=0` instead of finding the same 10 and skipping duplicates.
 
-`backend/Dockerfile`
+Main goal:
+Fix production data-quality gaps after ingestion:
 
-Do not put Dockerfile in project root.
+1. APHIS inspection pagination / record limit.
+2. Text extraction into `document_text_blocks`.
+3. APHIS enforcement repeated-run consistency.
+4. Backward-compatible API naming for `source_type` / `source_subtype`.
 
-Tasks:
+Do not delete production data.
+Do not wipe Railway Postgres.
+Do not change Railway Bucket layout unless necessary.
+Do not build frontend.
+Do not add AI.
+Do not add Neo4j.
+Do not add Dagster.
+Do not add Celery.
 
-1. Create this exact file:
+Task 1 — Fix APHIS inspection pagination / partial ingestion:
 
-`backend/Dockerfile`
+- Inspect `backend/app/services/ingestion/aphis_adapter.py` and any related APHIS scraping scripts.
+- Remove hardcoded limits that stop at 25 records or only first visible rows.
+- The scraper must paginate or scroll through all available APHIS inspection rows for the configured search.
+- Manual APHIS check showed Equitech-Bio Inc. certificate `74-B-0345` has 29 rows in the official APHIS Public Search Tool.
+- The ingestion response must report accurate:
+  - `records_found`
+  - `records_saved`
+  - `duplicates_skipped`
+  - `changed_records`
+  - `errors`
 
-Use this exact content:
+- Add guardrails like `max_pages` or `max_rows` only as safety limits, not as a hidden production limit.
+- If APHIS pagination cannot be fully solved in one pass, return clear errors/warnings instead of silently saving partial data.
 
-```dockerfile
-FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
+Task 2 — Wire text extraction into ingestion:
+Use existing table `document_text_blocks`.
 
-WORKDIR /app
+Current schema has:
 
-ENV PYTHONUNBUFFERED=1
-ENV PORT=8080
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+- `id`
+- `source_document_id`
+- `page_number`
+- `block_index`
+- `text`
+- `confidence`
+- `created_at`
 
-COPY requirements.txt .
+Implement extraction for existing source types:
 
-RUN pip install --no-cache-dir -r requirements.txt
+- PDF files:
+  - Use a pure Python PDF text extraction library, preferably `pypdf`.
+  - Extract text page by page.
+  - Insert one or more text blocks per page.
+  - Use `page_number` for PDF pages.
+  - Use `confidence = 1.0` for normal embedded-text extraction.
+  - If PDF text is empty, record an error/warning but do not crash ingestion.
 
-COPY . .
+- XML files:
+  - Extract readable text from XML using Python standard library or safe parser.
+  - Chunk into text blocks.
+  - Use `page_number = 1`.
+  - Use `confidence = 1.0`.
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+- JSON files:
+  - Extract useful JSON text/fields or pretty-printed JSON.
+  - Chunk into text blocks.
+  - Use `page_number = 1`.
+  - Use `confidence = 1.0`.
+
+Important:
+
+- Extraction must be idempotent.
+- If a source document already has text blocks, do not insert duplicates.
+- Extraction should run automatically after a new source document is saved.
+- Also create a backfill path for existing 37 production documents.
+
+Task 3 — Add storage read support if missing:
+
+- If `storage_service.py` only supports saving raw bytes, add a safe `read_raw_bytes(storage_path)` function.
+- It must support Railway Bucket/S3 storage paths and local storage.
+- For Railway Bucket, use existing S3-compatible env vars:
+  - `S3_ENDPOINT_URL`
+  - `S3_BUCKET_NAME`
+  - `AWS_ACCESS_KEY_ID`
+  - `AWS_SECRET_ACCESS_KEY`
+  - `AWS_DEFAULT_REGION`
+
+- If reading from storage fails, fallback to downloading from `source_url` only as a fallback and log that fallback clearly.
+
+Task 4 — Add protected extraction backfill endpoint:
+Create a backend endpoint like:
+
+`POST /extraction/backfill/run`
+
+Security:
+
+- Require the same `x-api-key` / `INGESTION_API_KEY` protection used by ingestion endpoints.
+
+Behavior:
+
+- Find all `source_documents` without matching `document_text_blocks`.
+- Extract text from raw stored file.
+- Insert text blocks.
+- Do not duplicate text blocks.
+- Return JSON:
+
+```json
+{
+  "status": "success",
+  "documents_checked": 37,
+  "documents_extracted": 37,
+  "documents_skipped": 0,
+  "text_blocks_created": 123,
+  "errors": []
+}
 ```
 
-2. Update `backend/requirements.txt`.
+If some files fail extraction, endpoint should still complete and include errors array.
 
-Make sure these dependencies exist:
+Task 5 — Add local script:
+Create:
 
-```txt
-fastapi
-uvicorn[standard]
-sqlalchemy
-alembic
-pydantic-settings
-python-dotenv
-requests
-psycopg2-binary
-boto3
-botocore
-playwright==1.60.0
-```
+`backend/scripts/backfill_text_extraction.py`
 
-If `playwright` exists without version pinning, change it to:
+It should:
 
-```txt
-playwright==1.60.0
-```
+- Use current database config.
+- Run extraction backfill locally or against configured DB.
+- Print:
+  - documents_checked
+  - documents_extracted
+  - documents_skipped
+  - text_blocks_created
+  - errors
 
-Reason:
-The Docker base image is `mcr.microsoft.com/playwright/python:v1.60.0-noble`, so the Python package version should match the browser image version.
+Task 6 — Fix APHIS enforcement repeated-run behavior:
 
-3. Remove deployment conflicts.
+- Inspect APHIS enforcement ingestion logic.
+- Repeated production verification should rediscover the same enforcement records and return duplicates skipped.
+- Expected second-pass behavior:
+  - `records_found` should equal rediscovered enforcement records.
+  - `records_saved = 0`
+  - `duplicates_skipped > 0`
 
-Check if this file exists:
+- If APHIS source page changes or is unavailable, return clear `errors`, not silent success with `records_found=0`.
 
-`backend/Procfile`
+Task 7 — Source type naming consistency:
 
-If it exists, delete it.
+- DB column is `source_type`.
+- API/n8n sometimes returns `source_subtype`.
+- Do not break current n8n workflow.
+- Add backward-compatible responses that include both:
+  - `source_type`
+  - `source_subtype`
 
-Reason:
-Railway previously used Procfile/Railpack instead of Dockerfile. We want Dockerfile to be the single source of deployment truth.
+- They can contain the same value for now.
+- Do not rename DB columns in this task.
 
-4. Remove or ignore `backend/nixpacks.toml`.
+Task 8 — Requirements:
 
-If `backend/nixpacks.toml` exists, either delete it or leave a clear note in README that Dockerfile is now the real deployment method. Prefer deleting it to avoid confusion.
+- Add `pypdf` to `backend/requirements.txt` if not already present.
+- Avoid heavy OCR dependencies for now.
+- Do not install Tesseract/PaddleOCR in this task.
+- First goal is embedded-text extraction and searchable text blocks.
+- OCR fallback can be a later task.
 
-5. Make sure the app still starts through Docker CMD.
-
-Do not add a new Railway build command.
-Do not make Railway build command and start command the same.
-Dockerfile CMD already runs:
-
-`alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}`
-
-6. Update `backend/README.md`.
-
-Add a section:
-
-```md
-## Railway Docker Deployment
-
-Railway uses `backend/Dockerfile` because the service Root Directory is `backend`.
-
-The Dockerfile uses the official Playwright Python image:
-
-`mcr.microsoft.com/playwright/python:v1.60.0-noble`
-
-This is required because APHIS scraping uses Playwright/Chromium. A normal Python/Railpack build installs the Playwright Python package but does not install Chromium browser binaries, causing APHIS ingestion to fail.
-
-Railway variables still required:
-
-- DATABASE_URL
-- INGESTION_API_KEY
-- RAW_STORAGE_MODE=railway_bucket
-- S3_ENDPOINT_URL
-- S3_BUCKET_NAME
-- AWS_ACCESS_KEY_ID
-- AWS_SECRET_ACCESS_KEY
-- AWS_DEFAULT_REGION
-```
-
-7. Run local checks:
+Task 9 — Verification commands:
+Run:
 
 ```powershell
 cd backend
 python -m compileall app scripts
 ```
 
-8. Commit and push.
+If possible, run local smoke/backfill tests.
 
-Use commit message:
+After implementation, update `backend/README.md` with:
 
-```text
-Add Dockerfile for Railway Playwright deployment
+- extraction flow
+- backfill endpoint
+- document_text_blocks verification SQL
+- APHIS pagination note
+- enforcement repeated-run behavior
+
+Task 10 — Append/update `AGENT_HANDOFF.md`:
+Include:
+
+- files changed
+- exact commands run
+- outputs
+- what was fixed
+- what remains blocked
+- how to verify after Railway deployment
+- expected SQL after backfill:
+
+```sql
+SELECT COUNT(*) AS total_text_blocks FROM document_text_blocks;
 ```
 
-9. Append/update `AGENT_HANDOFF.md`.
+Expected after backfill:
 
-Add:
+- should be greater than 0
 
-- Dockerfile created
-- Procfile removed or status noted
-- nixpacks.toml removed or status noted
-- requirements updated
-- compile command run
-- output
-- next Railway verification steps
-- remaining blockers if any
+Also include expected n8n/API test:
 
-Do not build frontend.
-Do not add AI.
-Do not add Neo4j.
-Do not add Dagster.
-Do not add Celery.
-Do not change ingestion logic unless required for Docker compatibility.
-Focus only on making Railway use Dockerfile with Playwright/Chromium correctly.
+- POST `/extraction/backfill/run` with `x-api-key`
+- then check `document_text_blocks`

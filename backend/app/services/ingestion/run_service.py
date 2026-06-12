@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.ingestion_run import IngestionRun
 from app.models.source_document import SourceDocument
+from app.services.extraction_service import extract_text_blocks
 from app.services.ingestion.ecfr_adapter import fetch_ecfr_title_9_sample
 from app.services.ingestion.federal_register_adapter import (
     fetch_federal_register_animal_welfare_records,
@@ -97,27 +98,34 @@ def run_ecfr_ingestion(db: Session) -> dict[str, Any]:
             else:
                 changed_records = 1
         else:
-            db.add(
-                SourceDocument(
-                    source_name="ecfr",
-                    source_type="regulatory_citation_mapping",
-                    source_url=result["source_url"],
-                    document_title="eCFR Title 9 regulatory text",
-                    document_date=None,
-                    retrieved_at=result["retrieved_at"],
-                    content_hash=result["content_hash"],
-                    storage_path=result["storage_path"],
-                    mime_type="application/xml",
-                    file_size_bytes=result["file_size_bytes"],
-                    canonical_key=canonical_key,
-                    raw_metadata_json={
-                        "source": "eCFR API",
-                        "title": "Title 9",
-                        "purpose": "CFR citation mapping for AWA violations",
-                    },
-                )
+            doc = SourceDocument(
+                source_name="ecfr",
+                source_type="regulatory_citation_mapping",
+                source_url=result["source_url"],
+                document_title="eCFR Title 9 regulatory text",
+                document_date=None,
+                retrieved_at=result["retrieved_at"],
+                content_hash=result["content_hash"],
+                storage_path=result["storage_path"],
+                mime_type="application/xml",
+                file_size_bytes=result["file_size_bytes"],
+                canonical_key=canonical_key,
+                raw_metadata_json={
+                    "source": "eCFR API",
+                    "title": "Title 9",
+                    "purpose": "CFR citation mapping for AWA violations",
+                },
             )
+            db.add(doc)
             db.commit()
+            db.refresh(doc)
+            extract_text_blocks(
+                db,
+                source_document_id=doc.id,
+                mime_type="application/xml",
+                storage_path=result["storage_path"],
+                fallback_url=result["source_url"],
+            )
             saved = 1
 
         _finish_run(
@@ -129,6 +137,7 @@ def run_ecfr_ingestion(db: Session) -> dict[str, Any]:
         )
         return {
             "source_name": "ecfr",
+            "source_type": "regulatory_citation_mapping",
             "source_subtype": "regulatory_citation_mapping",
             "status": "success",
             "records_found": 1,
@@ -182,21 +191,29 @@ def run_federal_register_ingestion(
                 duplicates_skipped += 1
                 continue
 
-            db.add(
-                SourceDocument(
-                    source_name="federal_register",
-                    source_type=record.get("type") or "federal_register_document",
-                    source_url=source_url,
-                    document_title=record.get("title"),
-                    document_date=_parse_date(record.get("publication_date")),
-                    retrieved_at=result["retrieved_at"],
-                    content_hash=result["content_hash"],
-                    storage_path=result["storage_path"],
-                    mime_type="application/json",
-                    file_size_bytes=result["file_size_bytes"],
-                    canonical_key=canonical_key,
-                    raw_metadata_json=record,
-                )
+            doc = SourceDocument(
+                source_name="federal_register",
+                source_type=record.get("type") or "federal_register_document",
+                source_url=source_url,
+                document_title=record.get("title"),
+                document_date=_parse_date(record.get("publication_date")),
+                retrieved_at=result["retrieved_at"],
+                content_hash=result["content_hash"],
+                storage_path=result["storage_path"],
+                mime_type="application/json",
+                file_size_bytes=result["file_size_bytes"],
+                canonical_key=canonical_key,
+                raw_metadata_json=record,
+            )
+            db.add(doc)
+            db.commit()
+            db.refresh(doc)
+            extract_text_blocks(
+                db,
+                source_document_id=doc.id,
+                mime_type="application/json",
+                storage_path=result["storage_path"],
+                fallback_url=source_url,
             )
             saved += 1
 
@@ -210,6 +227,7 @@ def run_federal_register_ingestion(
         )
         return {
             "source_name": "federal_register",
+            "source_type": "regulatory_records",
             "source_subtype": "regulatory_records",
             "status": "success",
             "records_found": len(records),
