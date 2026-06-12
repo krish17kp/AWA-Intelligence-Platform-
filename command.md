@@ -1,66 +1,71 @@
-Fix missing ingestion API routes for Railway/n8n.
+Before making any changes, read `command.md` fully.
 
-Current Railway result:
-GET /ingestion/summary returns {"detail":"Not Found"}.
+Fix the remaining Railway production ingestion blockers.
+
+Current status:
+
+- Railway backend is deployed.
+- `/ingestion/summary` works.
+- n8n can reach Railway backend.
+- Dedupe endpoint worked after API key setup.
+- APHIS ingestion fails on Railway because Playwright Chromium is missing.
+- AGENT_HANDOFF.md says Railway Bucket endpoint was assumed, so bucket storage must be verified/fixed.
+- Need production ingestion to save raw files into Railway Bucket and metadata into Railway PostgreSQL.
 
 Tasks:
 
-1. Create `backend/app/api/routes/ingestion.py`.
-2. Add `router = APIRouter(prefix="/ingestion", tags=["ingestion"])`.
-3. Add `GET /ingestion/summary` returning:
-   - total_documents
-   - total_ingestion_runs
-   - documents_by_source
-   - latest_ingestion_runs
-   - storage_mode
-4. Add POST endpoints:
-   - `/ingestion/ecfr/run`
-   - `/ingestion/federal-register/run`
-   - `/ingestion/aphis/inspection-reports/run`
-   - `/ingestion/aphis/enforcement-actions/run`
-   - `/ingestion/aphis/licensed-registered-persons/run`
-   - `/ingestion/aphis/annual-reports/run`
-   - `/ingestion/foia/logs/run`
-5. Sources without implemented behavior must return truthful
-   `source_behavior_pending` JSON with zero counts, no errors, and a null
-   ingestion run ID.
-6. Connect implemented endpoints to existing APHIS, eCFR, and Federal Register
-   ingestion logic.
-7. Protect every POST endpoint with `x-api-key` compared to
-   `settings.ingestion_api_key`.
-8. Add `ingestion_api_key` to config if missing.
-9. Register the ingestion router in `app/main.py`.
-10. Create and register `backend/app/api/routes/maintenance.py`.
-11. Add `POST /maintenance/dedupe-source-documents`.
-12. Run `python -m compileall app`.
-13. Commit and push.
+1. Fix Playwright/Chromium on Railway.
+   - Ensure `playwright` is in `requirements.txt`.
+   - Add proper Railway/Nixpacks setup so Chromium is installed during build, not at runtime.
+   - Create/update `backend/nixpacks.toml` if needed.
+   - Do not make buildCommand and startCommand the same.
+   - Railway start command should remain:
+     `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 
-Do not build frontend, AI, Neo4j, Dagster, or Celery.
+2. Fix Railway Bucket storage implementation.
+   - Do not use an assumed fake Railway bucket URL.
+   - Use Railway Bucket’s S3-compatible variables:
+     `S3_ENDPOINT_URL`
+     `S3_BUCKET_NAME`
+     `AWS_ACCESS_KEY_ID`
+     `AWS_SECRET_ACCESS_KEY`
+     `AWS_DEFAULT_REGION`
+   - Use `boto3`/S3-compatible client for uploads.
+   - Raw files must be stored in Railway Bucket when `RAW_STORAGE_MODE=railway_bucket`.
+   - Local storage should remain only as development fallback.
 
-## Required Handoff Report After Implementation
+3. Verify database migration.
+   - Ensure `canonical_key` migration runs through Alembic.
+   - Ensure Railway Postgres has required tables and columns.
 
-After completing every implementation, create or update:
+4. Ensure ingestion endpoints work:
+   - `POST /ingestion/ecfr/run`
+   - `POST /ingestion/federal-register/run`
+   - `POST /ingestion/aphis/inspection-reports/run`
+   - `POST /ingestion/aphis/enforcement-actions/run`
+   - `POST /maintenance/dedupe-source-documents`
+   - `GET /ingestion/summary`
 
-```text
-AGENT_HANDOFF.md
-```
+5. Add/verify production test scripts:
+   - `scripts/test_storage_backend.py`
+   - `scripts/verify_production_ingestion.py`
 
-The report must include:
+6. After changes, run:
+   - `python -m compileall app scripts`
+   - `python scripts/smoke_test_ingestion.py`
 
-1. Summary of Work Done
-2. Files Created or Modified
-3. Commands Run
-4. Command Outputs for:
-   - `python scripts\create_local_tables.py`
-   - `python scripts\show_data_sources.py`
-   - `python scripts\collect_ecfr_sample.py`
-   - `python scripts\collect_federal_register_sample.py`
-   - `python scripts\smoke_test_ingestion.py`
-5. API Verification for:
-   - `http://127.0.0.1:8000/health`
-   - `http://127.0.0.1:8000/documents`
-   - `http://127.0.0.1:8000/ingestion-runs`
-   - `http://127.0.0.1:8000/documents/1`
-6. Errors or Failed Items
-7. Remaining Work
-8. Supabase Readiness
+7. Commit and push changes.
+
+8. Append/update `AGENT_HANDOFF.md` with:
+   - files changed
+   - exact fixes made
+   - commands run
+   - outputs
+   - Railway-specific notes
+   - remaining blockers if any
+
+Do not build frontend.
+Do not add AI.
+Do not add Neo4j, Dagster, or Celery.
+Do not change project scope.
+Focus only on Railway Playwright, Railway Bucket storage, migrations, and production ingestion readiness.

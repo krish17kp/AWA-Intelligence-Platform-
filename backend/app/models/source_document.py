@@ -24,6 +24,7 @@ class SourceDocument(Base):
     file_size_bytes = Column(BigInteger, nullable=True)
 
     raw_metadata_json = Column(JSON, nullable=True)
+    canonical_key = Column(String(255), nullable=True, index=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

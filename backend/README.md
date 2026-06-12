@@ -18,13 +18,13 @@ $env:PYTHONPATH = (Get-Location).Path
 pip install -r requirements.txt
 ```
 
-### Create Local Database Tables
+### Playwright (for APHIS browser automation)
 
 ```powershell
-python scripts\create_local_tables.py
+playwright install chromium
 ```
 
-### Run Database Migrations (Alembic)
+### Run Database Migrations
 
 ```powershell
 alembic upgrade head
@@ -34,70 +34,6 @@ alembic upgrade head
 
 ```powershell
 python scripts\show_data_sources.py
-```
-
-### Run eCFR Sample Ingestion
-
-```powershell
-python scripts\collect_ecfr_sample.py
-```
-
-Expected output:
-```
-eCFR sample collection completed.
-Records saved: 1
-Raw file saved at: storage/raw/ecfr/YYYY-MM-DD/ecfr_title_9_sample_YYYYMMDD_HHMMSS.xml
-```
-
-### Run Federal Register Sample Ingestion
-
-```powershell
-python scripts\collect_federal_register_sample.py
-```
-
-Expected output:
-```
-Federal Register sample collection completed.
-Records found: X
-Records saved: X
-Raw file saved at: storage/raw/federal_register/YYYY-MM-DD/federal_register_animal_welfare_YYYYMMDD_HHMMSS.json
-```
-
-### Run APHIS Inspection Report Ingestion
-
-Install the Playwright browser once:
-
-```powershell
-playwright install chromium
-```
-
-Collect one page of Texas inspection reports:
-
-```powershell
-python scripts\collect_aphis_inspection_reports.py --state TX --max-pages 1
-```
-
-Use `--max-pages 0` for all available pages. The command prints JSON so n8n
-can execute it and capture the ingestion result. Raw PDFs are validated,
-hashed, deduplicated, and saved under:
-
-For controlled test batches, use `--max-facilities-per-page` and
-`--max-documents`. A value of `0` means no limit.
-
-```text
-storage/raw/aphis_public_search_tool/YYYY-MM-DD/
-```
-
-Collect one APHIS enforcement action PDF:
-
-```powershell
-python scripts\collect_aphis_enforcement_actions.py --max-pages 1 --max-documents 1
-```
-
-### Run Smoke Test
-
-```powershell
-python scripts\smoke_test_ingestion.py
 ```
 
 ### Start Backend Server
@@ -114,25 +50,116 @@ Set an ingestion API key before calling POST ingestion or maintenance routes:
 $env:INGESTION_API_KEY = "replace-with-a-secret"
 ```
 
-### API Endpoints
+## Railway Production
+
+**Production URL:** `https://awa-intelligence-platform-production.up.railway.app`
+
+### Railway Environment Variables
+
+| Variable | Value | Description |
+|----------|-------|-------------|
+| `DATABASE_URL` | `postgresql://...` | Railway PostgreSQL connection string |
+| `RAW_STORAGE_MODE` | `railway_bucket` or `local` | Where raw source files are stored |
+| `RAILWAY_BUCKET_NAME` | `awa-intelligence-raw` | Railway Bucket name for raw files |
+| `INGESTION_API_KEY` | `<secret>` | API key for POST ingestion endpoints |
+
+### Procfile
+
+```text
+web: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+## API Endpoints
+
+### Public Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/` | GET | Root health check |
 | `/health` | GET | Health check |
-| `/documents` | GET | List documents (supports `source_name` filter, `limit` param) |
+| `/documents` | GET | List documents (supports `source_name`, `limit`) |
 | `/documents/{id}` | GET | Get document detail |
 | `/ingestion-runs` | GET | List ingestion runs |
-| `/ingestion/summary` | GET | Ingestion totals, source counts, and latest runs |
-| `/ingestion/*/run` | POST | Run or receive source ingestion; requires `x-api-key` |
-| `/maintenance/dedupe-source-documents` | POST | Remove exact duplicate source-document rows; requires `x-api-key` |
+| `/ingestion/summary` | GET | Ingestion totals, source counts, latest runs |
 
-Example queries:
+### Authenticated Endpoints (require `x-api-key` header)
+
+All POST ingestion endpoints require the `INGESTION_API_KEY` in the `x-api-key` header.
+
+| Endpoint | Method | Source | Description |
+|----------|--------|--------|-------------|
+| `/ingestion/aphis/inspection-reports/run` | POST | APHIS Public Search Tool | Scrapes APHIS inspection reports via Playwright, downloads PDFs |
+| `/ingestion/aphis/enforcement-actions/run` | POST | APHIS Enforcement pages | Scrapes APHIS enforcement actions table, downloads PDFs |
+| `/ingestion/aphis/licensed-registered-persons/run` | POST | APHIS Public Search Tool | Not yet implemented — returns `source_behavior_pending` |
+| `/ingestion/aphis/annual-reports/run` | POST | APHIS Public Search Tool | Not yet implemented — returns `source_behavior_pending` |
+| `/ingestion/ecfr/run` | POST | eCFR API | Fetches Title 9 XML from eCFR versioner API |
+| `/ingestion/federal-register/run` | POST | Federal Register API | Fetches AWA/APHIS-related Federal Register documents |
+| `/ingestion/foia/logs/run` | POST | FOIA | Not yet implemented — returns `source_behavior_pending` |
+| `/maintenance/dedupe-source-documents` | POST | — | Removes exact duplicate source document rows |
+
+### Response Contract (POST ingestion endpoints)
+
+```json
+{
+  "source_name": "string",
+  "source_subtype": "string",
+  "status": "success | partial_success | source_behavior_pending | failed",
+  "records_found": 0,
+  "records_saved": 0,
+  "duplicates_skipped": 0,
+  "changed_records": 0,
+  "errors": [],
+  "ingestion_run_id": 0
+}
 ```
-http://127.0.0.1:8000/health
-http://127.0.0.1:8000/documents
-http://127.0.0.1:8000/documents?source_name=ecfr&limit=5
-http://127.0.0.1:8000/documents/1
-http://127.0.0.1:8000/ingestion-runs
+
+## Storage Behavior
+
+### Local Mode (`RAW_STORAGE_MODE=local`)
+
+Raw files are written to `backend/storage/raw/{source_name}/{YYYY-MM-DD}/{filename}`.
+
+### Railway Bucket Mode (`RAW_STORAGE_MODE=railway_bucket`)
+
+Raw files are stored in Railway Bucket with key format:
+`sources/{source_name}/{YYYY-MM-DD}/{filename}`
+
+- **No raw files are written to local filesystem** in production mode.
+- If Railway Bucket is unreachable, falls back to local storage.
+- Storage path is stored in PostgreSQL as `storage_path`.
+
+## Deduplication
+
+Each source document is tagged with a `canonical_key`:
+- `aphis:inspection_report:{source_url_or_pdf_url_hash}`
+- `aphis:enforcement_action:{source_url_or_pdf_url_hash}`
+- `ecfr:title-9:2024-01-01`
+- `federal_register:{document_number_or_source_url}`
+- `foia:{request_id_or_content_hash}`
+
+Rules:
+- Same canonical_key + same hash = skip duplicate.
+- Same canonical_key + different hash = preserve as changed version.
+- Raw evidence is never overwritten.
+
+## Verifying Production
+
+### Quick Verification Script
+
+```powershell
+python scripts\verify_production_ingestion.py --base-url https://awa-intelligence-platform-production.up.railway.app --api-key YOUR_KEY
+```
+
+### Storage Backend Test
+
+```powershell
+python scripts\test_storage_backend.py
+```
+
+### Smoke Test (local)
+
+```powershell
+python scripts\smoke_test_ingestion.py
 ```
 
 ## Project Structure
@@ -145,25 +172,17 @@ backend/
     models/             # SQLAlchemy models
     schemas/            # Pydantic schemas
     services/           # Business logic
-      ingestion/        # Source adapters
+      ingestion/        # Source adapters (APHIS, eCFR, Federal Register)
   scripts/              # Runnable scripts
-  storage/raw/          # Raw source file storage
+  storage/raw/          # Raw source file storage (local mode only)
   alembic/              # Database migrations
 ```
 
 ## Current Limitations
 
-- SQLite only (PostgreSQL/Supabase planned next)
-- No authentication
-- APHIS automation currently covers inspection report and enforcement action PDFs
-- No OCR or AI features
-- No frontend dashboard
-- No vector search or graph database
-
-## Next Steps
-
-1. Connect to Supabase PostgreSQL
-2. Extend APHIS collection to other record types
-3. Add OCR pipeline for PDF processing
-4. Build vector search for document retrieval
-5. Add authentication and authorization
+- APHIS licensed/registered persons, annual reports, and FOIA logs are not yet implemented (return `source_behavior_pending`).
+- Railway Bucket integration requires Railway environment setup.
+- APHIS inspection reports require Playwright with Chromium (not available on all Railway buildpacks without nixpacks.toml).
+- Federal Register filtering may still capture some non-APHIS records.
+- No OCR or AI features.
+- No frontend dashboard.

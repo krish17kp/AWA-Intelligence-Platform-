@@ -79,12 +79,24 @@ def run_ecfr_ingestion(db: Session) -> dict[str, Any]:
     try:
         result = fetch_ecfr_title_9_sample()
         saved = 0
-        if not _document_exists(
-            db,
-            source_name="ecfr",
-            source_url=result["source_url"],
-            content_hash=result["content_hash"],
-        ):
+        duplicates_skipped = 0
+        changed_records = 0
+
+        canonical_key = f"ecfr:title-9:2024-01-01"
+        existing = (
+            db.query(SourceDocument)
+            .filter(
+                SourceDocument.source_name == "ecfr",
+                SourceDocument.canonical_key == canonical_key,
+            )
+            .first()
+        )
+        if existing:
+            if existing.content_hash == result["content_hash"]:
+                duplicates_skipped = 1
+            else:
+                changed_records = 1
+        else:
             db.add(
                 SourceDocument(
                     source_name="ecfr",
@@ -97,6 +109,7 @@ def run_ecfr_ingestion(db: Session) -> dict[str, Any]:
                     storage_path=result["storage_path"],
                     mime_type="application/xml",
                     file_size_bytes=result["file_size_bytes"],
+                    canonical_key=canonical_key,
                     raw_metadata_json={
                         "source": "eCFR API",
                         "title": "Title 9",
@@ -115,11 +128,15 @@ def run_ecfr_ingestion(db: Session) -> dict[str, Any]:
             records_saved=saved,
         )
         return {
-            "ingestion_run_id": run_id,
-            "run_status": "success",
+            "source_name": "ecfr",
+            "source_subtype": "regulatory_citation_mapping",
+            "status": "success",
             "records_found": 1,
             "records_saved": saved,
-            "duplicates_skipped": 1 - saved,
+            "duplicates_skipped": duplicates_skipped,
+            "changed_records": changed_records,
+            "errors": [],
+            "ingestion_run_id": run_id,
         }
     except Exception as error:
         db.rollback()
@@ -146,15 +163,23 @@ def run_federal_register_ingestion(
         result = fetch_federal_register_animal_welfare_records(per_page=per_page)
         records = result["raw_json"].get("results", [])
         saved = 0
+        duplicates_skipped = 0
 
         for record in records:
             source_url = record.get("html_url") or record.get("pdf_url")
-            if not source_url or _document_exists(
-                db,
-                source_name="federal_register",
-                source_url=source_url,
-                content_hash=result["content_hash"],
-            ):
+            if not source_url:
+                continue
+
+            doc_number = record.get("document_number", "")
+            canonical_key = f"federal_register:{doc_number}" if doc_number else f"federal_register:{source_url}"
+
+            existing = (
+                db.query(SourceDocument)
+                .filter(SourceDocument.canonical_key == canonical_key)
+                .first()
+            )
+            if existing:
+                duplicates_skipped += 1
                 continue
 
             db.add(
@@ -169,6 +194,7 @@ def run_federal_register_ingestion(
                     storage_path=result["storage_path"],
                     mime_type="application/json",
                     file_size_bytes=result["file_size_bytes"],
+                    canonical_key=canonical_key,
                     raw_metadata_json=record,
                 )
             )
@@ -183,11 +209,15 @@ def run_federal_register_ingestion(
             records_saved=saved,
         )
         return {
-            "ingestion_run_id": run_id,
-            "run_status": "success",
+            "source_name": "federal_register",
+            "source_subtype": "regulatory_records",
+            "status": "success",
             "records_found": len(records),
             "records_saved": saved,
-            "duplicates_skipped": len(records) - saved,
+            "duplicates_skipped": duplicates_skipped,
+            "changed_records": 0,
+            "errors": [],
+            "ingestion_run_id": run_id,
         }
     except Exception as error:
         db.rollback()

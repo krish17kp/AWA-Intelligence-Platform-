@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.ingestion_run import IngestionRun
@@ -345,6 +344,8 @@ def ingest_enforcement_actions(
 
     duplicates_skipped = 0
     download_failures = 0
+    changed_records = 0
+    errors: list[str] = []
 
     try:
         records = discover_enforcement_actions(
@@ -357,15 +358,16 @@ def ingest_enforcement_actions(
 
         for record in records:
             source_url = record["reportLink"]
-            existing_url = (
-                db.query(SourceDocument.id)
-                .filter(
-                    SourceDocument.source_name == SOURCE_NAME,
-                    SourceDocument.source_url == source_url,
-                )
+            source_id = generate_hash_id(source_url)
+            canonical_key = f"aphis:enforcement_action:{source_id}"
+
+            existing = (
+                db.query(SourceDocument)
+                .filter(SourceDocument.canonical_key == canonical_key)
                 .first()
             )
-            if existing_url:
+
+            if existing:
                 duplicates_skipped += 1
                 continue
 
@@ -373,37 +375,24 @@ def ingest_enforcement_actions(
                 content = download_pdf_bytes(source_url)
             except RuntimeError as error:
                 download_failures += 1
+                errors.append(f"PDF download failed for {source_url}: {error}")
                 logger.error("Skipping APHIS enforcement PDF: %s", error)
                 continue
 
             content_hash = sha256_bytes(content)
-            existing_content = (
-                db.query(SourceDocument.id)
-                .filter(
-                    SourceDocument.source_name == SOURCE_NAME,
-                    or_(
-                        SourceDocument.source_url == source_url,
-                        SourceDocument.content_hash == content_hash,
-                    ),
-                )
-                .first()
-            )
-            if existing_content:
-                duplicates_skipped += 1
-                continue
 
-            source_id = generate_hash_id(source_url)
-            storage_path = save_raw_bytes(
-                source_name=SOURCE_NAME,
-                filename=f"enforcement_{source_id}_{content_hash[:12]}.pdf",
-                content=content,
-            )
             document_date = parse_aphis_date(record.get("action_date"))
             title = "APHIS enforcement action"
             if record.get("dba"):
                 title += f" - {record['dba']}"
             if record.get("action_type"):
                 title += f" - {record['action_type']}"
+
+            storage_path = save_raw_bytes(
+                source_name=SOURCE_NAME,
+                filename=f"enforcement_{source_id}_{content_hash[:12]}.pdf",
+                content=content,
+            )
 
             db.add(
                 SourceDocument(
@@ -417,6 +406,7 @@ def ingest_enforcement_actions(
                     storage_path=storage_path,
                     mime_type="application/pdf",
                     file_size_bytes=len(content),
+                    canonical_key=canonical_key,
                     raw_metadata_json={
                         **record,
                         "record_type": "enforcement_action",
@@ -434,12 +424,15 @@ def ingest_enforcement_actions(
         ingestion_run.finished_at = datetime.now(timezone.utc)
         db.commit()
         return {
-            "ingestion_run_id": ingestion_run_id,
-            "run_status": ingestion_run.run_status,
+            "source_name": SOURCE_NAME,
+            "source_subtype": "enforcement_actions",
+            "status": ingestion_run.run_status,
             "records_found": ingestion_run.records_found,
             "records_saved": ingestion_run.records_saved,
             "duplicates_skipped": duplicates_skipped,
-            "download_failures": download_failures,
+            "changed_records": changed_records,
+            "errors": errors,
+            "ingestion_run_id": ingestion_run_id,
         }
     except Exception as error:
         db.rollback()
@@ -476,6 +469,8 @@ def ingest_inspection_reports(
 
     duplicates_skipped = 0
     download_failures = 0
+    changed_records = 0
+    errors: list[str] = []
 
     try:
         records = discover_inspection_reports(
@@ -491,16 +486,15 @@ def ingest_inspection_reports(
         for record in records:
             raw_link = str(record.get("reportLink") or "").strip()
             source_url = normalize_pdf_url(raw_link)
+            source_id = generate_hash_id(source_url)
+            canonical_key = f"aphis:inspection_report:{source_id}"
 
-            existing_url = (
-                db.query(SourceDocument.id)
-                .filter(
-                    SourceDocument.source_name == SOURCE_NAME,
-                    SourceDocument.source_url == source_url,
-                )
+            existing = (
+                db.query(SourceDocument)
+                .filter(SourceDocument.canonical_key == canonical_key)
                 .first()
             )
-            if existing_url:
+            if existing:
                 duplicates_skipped += 1
                 continue
 
@@ -508,30 +502,15 @@ def ingest_inspection_reports(
                 content = download_pdf_bytes(source_url)
             except RuntimeError as error:
                 download_failures += 1
+                errors.append(f"PDF download failed for {source_url}: {error}")
                 logger.error("Skipping APHIS PDF after download failure: %s", error)
                 continue
 
             content_hash = sha256_bytes(content)
-            existing_content = (
-                db.query(SourceDocument.id)
-                .filter(
-                    SourceDocument.source_name == SOURCE_NAME,
-                    or_(
-                        SourceDocument.source_url == source_url,
-                        SourceDocument.content_hash == content_hash,
-                    ),
-                )
-                .first()
-            )
-            if existing_content:
-                duplicates_skipped += 1
-                continue
 
-            source_id = generate_hash_id(source_url)
-            filename = f"{source_id}_{content_hash[:12]}.pdf"
             storage_path = save_raw_bytes(
                 source_name=SOURCE_NAME,
-                filename=filename,
+                filename=f"{source_id}_{content_hash[:12]}.pdf",
                 content=content,
             )
             retrieved_at = datetime.now(timezone.utc)
@@ -549,6 +528,7 @@ def ingest_inspection_reports(
                     storage_path=storage_path,
                     mime_type="application/pdf",
                     file_size_bytes=len(content),
+                    canonical_key=canonical_key,
                     raw_metadata_json={
                         **record,
                         "record_type": "inspection_report",
@@ -570,12 +550,15 @@ def ingest_inspection_reports(
         db.commit()
 
         return {
-            "ingestion_run_id": ingestion_run_id,
-            "run_status": ingestion_run.run_status,
+            "source_name": SOURCE_NAME,
+            "source_subtype": "inspection_reports",
+            "status": ingestion_run.run_status,
             "records_found": ingestion_run.records_found,
             "records_saved": ingestion_run.records_saved,
             "duplicates_skipped": duplicates_skipped,
-            "download_failures": download_failures,
+            "changed_records": changed_records,
+            "errors": errors,
+            "ingestion_run_id": ingestion_run_id,
         }
     except Exception as error:
         db.rollback()

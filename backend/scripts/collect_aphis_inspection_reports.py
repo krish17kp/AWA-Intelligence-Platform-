@@ -57,9 +57,9 @@ def main() -> int:
             headless=not args.headed,
         )
         print(json.dumps(result, indent=2))
-        return 0 if result["run_status"] == "success" else 2
+        return 0 if result["status"] == "success" else 2
     except Exception as error:
-        print(json.dumps({"run_status": "failed", "error": str(error)}, indent=2))
+        print(json.dumps({"status": "failed", "error": str(error)}, indent=2))
         return 1
     finally:
         db.close()
