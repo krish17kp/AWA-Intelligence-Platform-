@@ -1,71 +1,167 @@
 Before making any changes, read `command.md` fully.
 
-Fix the remaining Railway production ingestion blockers.
+Fix Railway Playwright/Chromium deployment using Dockerfile.
 
-Current status:
+Current problem:
+Railway APHIS ingestion fails with:
 
-- Railway backend is deployed.
-- `/ingestion/summary` works.
-- n8n can reach Railway backend.
-- Dedupe endpoint worked after API key setup.
-- APHIS ingestion fails on Railway because Playwright Chromium is missing.
-- AGENT_HANDOFF.md says Railway Bucket endpoint was assumed, so bucket storage must be verified/fixed.
-- Need production ingestion to save raw files into Railway Bucket and metadata into Railway PostgreSQL.
+`BrowserType.launch: Executable doesn't exist at /root/.cache/ms-playwright/.../chrome-headless-shell`
+`Please run: playwright install`
+
+Railway build logs currently show:
+
+- `using build driver railpack-v0.27.0`
+- `Found web command in Procfile`
+- `pip install -r requirements.txt`
+- Chromium browser binaries are not installed.
+
+This means the Python `playwright` package is installed, but the actual Chromium browser is missing.
+
+Goal:
+Use a Dockerfile-based Railway deployment so Chromium and browser system dependencies are available in production.
+
+Important project path:
+Railway Root Directory is `backend`, so Dockerfile must be created at:
+
+`backend/Dockerfile`
+
+Do not put Dockerfile in project root.
 
 Tasks:
 
-1. Fix Playwright/Chromium on Railway.
-   - Ensure `playwright` is in `requirements.txt`.
-   - Add proper Railway/Nixpacks setup so Chromium is installed during build, not at runtime.
-   - Create/update `backend/nixpacks.toml` if needed.
-   - Do not make buildCommand and startCommand the same.
-   - Railway start command should remain:
-     `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+1. Create this exact file:
 
-2. Fix Railway Bucket storage implementation.
-   - Do not use an assumed fake Railway bucket URL.
-   - Use Railway Bucket’s S3-compatible variables:
-     `S3_ENDPOINT_URL`
-     `S3_BUCKET_NAME`
-     `AWS_ACCESS_KEY_ID`
-     `AWS_SECRET_ACCESS_KEY`
-     `AWS_DEFAULT_REGION`
-   - Use `boto3`/S3-compatible client for uploads.
-   - Raw files must be stored in Railway Bucket when `RAW_STORAGE_MODE=railway_bucket`.
-   - Local storage should remain only as development fallback.
+`backend/Dockerfile`
 
-3. Verify database migration.
-   - Ensure `canonical_key` migration runs through Alembic.
-   - Ensure Railway Postgres has required tables and columns.
+Use this exact content:
 
-4. Ensure ingestion endpoints work:
-   - `POST /ingestion/ecfr/run`
-   - `POST /ingestion/federal-register/run`
-   - `POST /ingestion/aphis/inspection-reports/run`
-   - `POST /ingestion/aphis/enforcement-actions/run`
-   - `POST /maintenance/dedupe-source-documents`
-   - `GET /ingestion/summary`
+```dockerfile
+FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
 
-5. Add/verify production test scripts:
-   - `scripts/test_storage_backend.py`
-   - `scripts/verify_production_ingestion.py`
+WORKDIR /app
 
-6. After changes, run:
-   - `python -m compileall app scripts`
-   - `python scripts/smoke_test_ingestion.py`
+ENV PYTHONUNBUFFERED=1
+ENV PORT=8080
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-7. Commit and push changes.
+COPY requirements.txt .
 
-8. Append/update `AGENT_HANDOFF.md` with:
-   - files changed
-   - exact fixes made
-   - commands run
-   - outputs
-   - Railway-specific notes
-   - remaining blockers if any
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+```
+
+2. Update `backend/requirements.txt`.
+
+Make sure these dependencies exist:
+
+```txt
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+pydantic-settings
+python-dotenv
+requests
+psycopg2-binary
+boto3
+botocore
+playwright==1.60.0
+```
+
+If `playwright` exists without version pinning, change it to:
+
+```txt
+playwright==1.60.0
+```
+
+Reason:
+The Docker base image is `mcr.microsoft.com/playwright/python:v1.60.0-noble`, so the Python package version should match the browser image version.
+
+3. Remove deployment conflicts.
+
+Check if this file exists:
+
+`backend/Procfile`
+
+If it exists, delete it.
+
+Reason:
+Railway previously used Procfile/Railpack instead of Dockerfile. We want Dockerfile to be the single source of deployment truth.
+
+4. Remove or ignore `backend/nixpacks.toml`.
+
+If `backend/nixpacks.toml` exists, either delete it or leave a clear note in README that Dockerfile is now the real deployment method. Prefer deleting it to avoid confusion.
+
+5. Make sure the app still starts through Docker CMD.
+
+Do not add a new Railway build command.
+Do not make Railway build command and start command the same.
+Dockerfile CMD already runs:
+
+`alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}`
+
+6. Update `backend/README.md`.
+
+Add a section:
+
+```md
+## Railway Docker Deployment
+
+Railway uses `backend/Dockerfile` because the service Root Directory is `backend`.
+
+The Dockerfile uses the official Playwright Python image:
+
+`mcr.microsoft.com/playwright/python:v1.60.0-noble`
+
+This is required because APHIS scraping uses Playwright/Chromium. A normal Python/Railpack build installs the Playwright Python package but does not install Chromium browser binaries, causing APHIS ingestion to fail.
+
+Railway variables still required:
+
+- DATABASE_URL
+- INGESTION_API_KEY
+- RAW_STORAGE_MODE=railway_bucket
+- S3_ENDPOINT_URL
+- S3_BUCKET_NAME
+- AWS_ACCESS_KEY_ID
+- AWS_SECRET_ACCESS_KEY
+- AWS_DEFAULT_REGION
+```
+
+7. Run local checks:
+
+```powershell
+cd backend
+python -m compileall app scripts
+```
+
+8. Commit and push.
+
+Use commit message:
+
+```text
+Add Dockerfile for Railway Playwright deployment
+```
+
+9. Append/update `AGENT_HANDOFF.md`.
+
+Add:
+
+- Dockerfile created
+- Procfile removed or status noted
+- nixpacks.toml removed or status noted
+- requirements updated
+- compile command run
+- output
+- next Railway verification steps
+- remaining blockers if any
 
 Do not build frontend.
 Do not add AI.
-Do not add Neo4j, Dagster, or Celery.
-Do not change project scope.
-Focus only on Railway Playwright, Railway Bucket storage, migrations, and production ingestion readiness.
+Do not add Neo4j.
+Do not add Dagster.
+Do not add Celery.
+Do not change ingestion logic unless required for Docker compatibility.
+Focus only on making Railway use Dockerfile with Playwright/Chromium correctly.

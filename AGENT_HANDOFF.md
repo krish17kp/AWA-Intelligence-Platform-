@@ -165,3 +165,73 @@ web: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
 - Existing records in source_documents have `canonical_key=NULL` (pre-migration). New records will have canonical_key set.
 - Federal Register filtering still broad; may need tuning after production review.
 - Licensed/registered person, annual report, and FOIA endpoints return `source_behavior_pending`.
+
+---
+
+## 7. Dockerfile Deployment Update (June 12 — 2nd pass)
+
+### What changed
+
+Switched from `nixpacks.toml` to `Dockerfile` for Railway deployment.
+
+**Before:** `backend/nixpacks.toml` — Nixpkgs-based Chromium install using Railpack build driver.
+
+**After:** `backend/Dockerfile` — uses official Playwright Python Docker image `mcr.microsoft.com/playwright/python:v1.60.0-noble`.
+
+### Files changed
+
+| Action | File |
+|--------|------|
+| Created | `backend/Dockerfile` |
+| Deleted | `backend/Procfile` (now Docker CMD handles startup) |
+| Deleted | `backend/nixpacks.toml` (replaced by Docker) |
+| Modified | `backend/requirements.txt` — pinned `playwright==1.60.0`, added `botocore` |
+| Modified | `backend/README.md` — replaced Procfile/Railway env table with Docker deployment section |
+
+### Reason
+
+Railway's Railpack build driver installs `playwright` Python package but does **not** install Chromium browser binaries, causing APHIS ingestion to fail with:
+
+```
+Executable doesn't exist at /root/.cache/ms-playwright/.../chrome-headless-shell
+```
+
+The official Playwright Python Docker image (`mcr.microsoft.com/playwright/python:v1.60.0-noble`) includes Chromium pre-installed at `/ms-playwright`. The Python `playwright` package is pinned to `==1.60.0` to match the image's browser version.
+
+### requirements.txt diff
+
+```diff
+-playwright
++playwright==1.60.0
++botocore
+```
+
+### Dockerfile CMD
+
+```dockerfile
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+```
+
+This runs migrations then starts Uvicorn — same as the deleted Procfile.
+
+### Commands run
+
+```powershell
+cd backend
+python -m compileall -q app scripts
+```
+Output: `COMPILE OK`
+
+### Railway verification steps
+
+After deploying to Railway:
+
+1. Verify Railway picks up `backend/Dockerfile` (Root Directory = `backend`).
+2. Set Railway env vars: `DATABASE_URL`, `INGESTION_API_KEY`, `RAW_STORAGE_MODE=railway_bucket`, S3 vars.
+3. Test APHIS endpoint: `POST /ingestion/aphis/inspection-reports/run`
+4. Test eCFR endpoint: `POST /ingestion/ecfr/run`
+
+### Remaining blockers
+
+- Railway S3 endpoint URL must be verified against actual Railway-provided bucket values.
+- Existing `source_documents` rows have `canonical_key=NULL` — only new records get canonical_key set.

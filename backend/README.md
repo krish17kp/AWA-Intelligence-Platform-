@@ -54,20 +54,28 @@ $env:INGESTION_API_KEY = "replace-with-a-secret"
 
 **Production URL:** `https://awa-intelligence-platform-production.up.railway.app`
 
+## Railway Docker Deployment
+
+Railway uses `backend/Dockerfile` because the service Root Directory is `backend`.
+
+The Dockerfile uses the official Playwright Python image:
+
+`mcr.microsoft.com/playwright/python:v1.60.0-noble`
+
+This is required because APHIS scraping uses Playwright/Chromium. A normal Python/Railpack build installs the Playwright Python package but does not install Chromium browser binaries, causing APHIS ingestion to fail.
+
 ### Railway Environment Variables
 
-| Variable | Value | Description |
-|----------|-------|-------------|
-| `DATABASE_URL` | `postgresql://...` | Railway PostgreSQL connection string |
-| `RAW_STORAGE_MODE` | `railway_bucket` or `local` | Where raw source files are stored |
-| `RAILWAY_BUCKET_NAME` | `awa-intelligence-raw` | Railway Bucket name for raw files |
-| `INGESTION_API_KEY` | `<secret>` | API key for POST ingestion endpoints |
-
-### Procfile
-
-```text
-web: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
-```
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | Railway PostgreSQL connection string |
+| `INGESTION_API_KEY` | API key for POST ingestion endpoints |
+| `RAW_STORAGE_MODE` | Set to `railway_bucket` for S3 bucket storage |
+| `S3_ENDPOINT_URL` | Railway Bucket S3-compatible endpoint |
+| `S3_BUCKET_NAME` | Railway Bucket name |
+| `AWS_ACCESS_KEY_ID` | Railway Bucket access key |
+| `AWS_SECRET_ACCESS_KEY` | Railway Bucket secret key |
+| `AWS_DEFAULT_REGION` | S3 region (default `us-east-1`)
 
 ## API Endpoints
 
@@ -181,8 +189,7 @@ backend/
 ## Current Limitations
 
 - APHIS licensed/registered persons, annual reports, and FOIA logs are not yet implemented (return `source_behavior_pending`).
-- Railway Bucket integration requires Railway environment setup.
-- APHIS inspection reports require Playwright with Chromium (not available on all Railway buildpacks without nixpacks.toml).
+- Railway Bucket S3 endpoint must be verified against actual Railway-provided values.
 - Federal Register filtering may still capture some non-APHIS records.
 - No OCR or AI features.
 - No frontend dashboard.
