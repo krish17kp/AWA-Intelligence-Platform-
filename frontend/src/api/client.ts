@@ -124,23 +124,24 @@ export interface IngestionRun {
 export interface CoverageResponse {
   historical_backfill_status: string
   message: string
-  total_documents: number
-  total_documents_with_text: number
   sources_attempted: string[]
   date_ranges_attempted: { start: string; end: string }[]
   total_records_by_source: Record<string, number>
+  latest_coverage_snapshots: unknown[]
   last_successful_run: {
     id: number
     source: string
     status: string
+    run_type: string | null
     started_at: string | null
     completed_at: string | null
     records_found: number
     records_saved: number
+    new_documents: number
+    duplicates_skipped: number
+    failed_documents: number
   } | null
-  coverage_snapshots: unknown[]
-  coverage_snapshots_note?: string
-  historical_backfill_details?: string
+  known_limitations: string[]
 }
 
 export interface BackfillPlanRequest {
@@ -159,6 +160,40 @@ export interface BackfillPlanResponse {
   dry_run: boolean
   planned_stages: string[]
   warning: string
+}
+
+export interface BackfillRunRequest {
+  source: string
+  start_date: string
+  end_date: string
+  max_pages: number
+  page_size: number
+  dry_run: boolean
+  force_refresh: boolean
+}
+
+export interface BackfillRunResponse {
+  run_id: number
+  source: string
+  status: string
+  dry_run: boolean
+  records_found: number
+  new_documents: number
+  duplicates_skipped: number
+  failed_documents: number
+  records_preserved: number
+  records_extracted: number
+  errors: string[]
+  warning: string
+}
+
+export interface IngestionEventItem {
+  id: number
+  event_type: string
+  message: string | null
+  document_id: number | null
+  payload: Record<string, unknown> | null
+  created_at: string | null
 }
 
 export function getHealth(): Promise<HealthResponse> {
@@ -210,12 +245,23 @@ export function getIngestionRuns(): Promise<IngestionRun[]> {
   return request('/ingestion/runs')
 }
 
+export function getIngestionRunEvents(runId: number): Promise<IngestionEventItem[]> {
+  return request(`/ingestion/runs/${runId}/events`)
+}
+
 export function getCoverage(): Promise<CoverageResponse> {
   return request('/coverage')
 }
 
 export function createBackfillPlan(payload: BackfillPlanRequest): Promise<BackfillPlanResponse> {
   return request('/backfill/plan', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function runBackfill(payload: BackfillRunRequest): Promise<BackfillRunResponse> {
+  return request('/backfill/run', {
     method: 'POST',
     body: JSON.stringify(payload),
   })

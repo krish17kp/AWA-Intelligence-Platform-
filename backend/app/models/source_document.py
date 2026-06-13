@@ -26,5 +26,10 @@ class SourceDocument(Base):
     raw_metadata_json = Column(JSON, nullable=True)
     canonical_key = Column(String(255), nullable=True, index=True)
 
+    duplicate_of = Column(Integer, nullable=True, index=True)
+    extraction_status = Column(String(50), nullable=False, default="pending", index=True)
+    extraction_method = Column(String(100), nullable=True)
+    text_storage_path = Column(Text, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

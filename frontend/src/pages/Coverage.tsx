@@ -1,7 +1,22 @@
 import { useEffect, useState, useCallback } from 'react'
-import { getCoverage, createBackfillPlan, type CoverageResponse, type BackfillPlanResponse } from '../api/client'
+import {
+  getCoverage,
+  createBackfillPlan,
+  runBackfill,
+  type CoverageResponse,
+  type BackfillPlanResponse,
+  type BackfillRunResponse,
+} from '../api/client'
 import Card from '../components/Card'
+import DataTable from '../components/DataTable'
 import StateMessage from '../components/StateMessage'
+
+const SOURCES = [
+  { value: 'aphis_inspections', label: 'APHIS Inspections' },
+  { value: 'aphis_enforcement', label: 'APHIS Enforcement' },
+  { value: 'federal_register', label: 'Federal Register' },
+  { value: 'ecfr', label: 'eCFR' },
+]
 
 export default function Coverage() {
   const [coverage, setCoverage] = useState<CoverageResponse | null>(null)
@@ -9,11 +24,14 @@ export default function Coverage() {
   const [loading, setLoading] = useState(true)
 
   const [planSource, setPlanSource] = useState('aphis_inspections')
-  const [planStart, setPlanStart] = useState('2020-01-01')
+  const [planStart, setPlanStart] = useState('2026-01-01')
   const [planEnd, setPlanEnd] = useState('2026-06-13')
-  const [planPages, setPlanPages] = useState(10)
+  const [planPages, setPlanPages] = useState(2)
+  const [planPageSize, setPlanPageSize] = useState(50)
   const [planDryRun, setPlanDryRun] = useState(true)
+  const [planForceRefresh, setPlanForceRefresh] = useState(false)
   const [planResult, setPlanResult] = useState<BackfillPlanResponse | null>(null)
+  const [runResult, setRunResult] = useState<BackfillRunResponse | null>(null)
   const [planError, setPlanError] = useState<string | null>(null)
   const [planSubmitting, setPlanSubmitting] = useState(false)
 
@@ -32,18 +50,19 @@ export default function Coverage() {
 
   useEffect(() => { load() }, [load])
 
-  async function handlePlanSubmit(e: React.FormEvent) {
+  async function handlePreviewPlan(e: React.FormEvent) {
     e.preventDefault()
     setPlanSubmitting(true)
     setPlanError(null)
     setPlanResult(null)
+    setRunResult(null)
     try {
       const result = await createBackfillPlan({
         source: planSource,
         start_date: planStart,
         end_date: planEnd,
         max_pages: planPages,
-        dry_run: planDryRun,
+        dry_run: true,
       })
       setPlanResult(result)
     } catch (e: unknown) {
@@ -53,9 +72,46 @@ export default function Coverage() {
     }
   }
 
+  async function handleRunBackfill(e: React.FormEvent) {
+    e.preventDefault()
+    setPlanSubmitting(true)
+    setPlanError(null)
+    setPlanResult(null)
+    setRunResult(null)
+    try {
+      const result = await runBackfill({
+        source: planSource,
+        start_date: planStart,
+        end_date: planEnd,
+        max_pages: planPages,
+        page_size: planPageSize,
+        dry_run: planDryRun,
+        force_refresh: planForceRefresh,
+      })
+      setRunResult(result)
+      load()
+    } catch (e: unknown) {
+      setPlanError(e instanceof Error ? e.message : 'Failed to run backfill')
+    } finally {
+      setPlanSubmitting(false)
+    }
+  }
+
   if (loading) return <StateMessage type="loading" />
   if (error) return <StateMessage type="error" message={error} onRetry={load} />
   if (!coverage) return <StateMessage type="empty" message="No coverage data available." />
+
+  const snapshotsColumns = [
+    { key: 'id', label: 'ID' },
+    { key: 'source', label: 'Source' },
+    { key: 'records_found', label: 'Records Found' },
+    { key: 'records_preserved', label: 'Preserved' },
+    { key: 'duplicates_skipped', label: 'Duplicates' },
+    { key: 'status', label: 'Status' },
+  ]
+  const snapshotsRows = (coverage.latest_coverage_snapshots || []).map(
+    (s) => s as Record<string, unknown>
+  )
 
   return (
     <div>
@@ -65,20 +121,22 @@ export default function Coverage() {
         <p className="text-sm font-medium text-yellow-800">
           {coverage.message}
         </p>
-        {coverage.historical_backfill_details && (
-          <p className="mt-2 text-xs text-yellow-700">
-            {coverage.historical_backfill_details}
-          </p>
+        {coverage.known_limitations && coverage.known_limitations.length > 0 && (
+          <ul className="mt-2 list-disc list-inside text-xs text-yellow-700 space-y-0.5">
+            {coverage.known_limitations.map((lim, i) => (
+              <li key={i}>{lim}</li>
+            ))}
+          </ul>
         )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <Card title="Total Documents" value={coverage.total_documents} variant="info" />
-        <Card title="Documents With Text" value={coverage.total_documents_with_text} variant="success" />
         <Card title="Backfill Status" value={coverage.historical_backfill_status} variant="warning" />
+        <Card title="Sources Attempted" value={coverage.sources_attempted.length} variant="info" />
+        <Card title="Records by Source" value={Object.keys(coverage.total_records_by_source).length} variant="info" />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Sources Attempted</h3>
           {coverage.sources_attempted.length === 0 ? (
@@ -110,20 +168,27 @@ export default function Coverage() {
       </div>
 
       {coverage.last_successful_run && (
-        <div className="mt-6 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="mb-6 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Last Successful Run</h3>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
             <div><span className="text-gray-500">Source:</span><p className="font-medium">{coverage.last_successful_run.source}</p></div>
             <div><span className="text-gray-500">Status:</span><p className="font-medium">{coverage.last_successful_run.status}</p></div>
             <div><span className="text-gray-500">Records:</span><p className="font-medium">{coverage.last_successful_run.records_found}</p></div>
-            <div><span className="text-gray-500">Saved:</span><p className="font-medium">{coverage.last_successful_run.records_saved}</p></div>
+            <div><span className="text-gray-500">New Docs:</span><p className="font-medium">{coverage.last_successful_run.new_documents}</p></div>
           </div>
         </div>
       )}
 
-      <div className="mt-8 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-        <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4">Backfill Plan</h3>
-        <form onSubmit={handlePlanSubmit} className="space-y-3">
+      {coverage.latest_coverage_snapshots && coverage.latest_coverage_snapshots.length > 0 && (
+        <div className="mb-6 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Latest Coverage Snapshots</h3>
+          <DataTable columns={snapshotsColumns} rows={snapshotsRows} emptyMessage="No snapshots available." />
+        </div>
+      )}
+
+      <div className="mt-8 rounded-lg border border-blue-200 bg-white p-4 shadow-sm">
+        <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4">Run Controlled Backfill</h3>
+        <form onSubmit={handleRunBackfill} className="space-y-3">
           <div className="flex flex-wrap gap-3">
             <div>
               <label className="block text-xs text-gray-500 mb-1">Source</label>
@@ -132,10 +197,9 @@ export default function Coverage() {
                 onChange={(e) => setPlanSource(e.target.value)}
                 className="px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
               >
-                <option value="aphis_inspections">APHIS Inspections</option>
-                <option value="aphis_enforcement">APHIS Enforcement</option>
-                <option value="ecfr">eCFR</option>
-                <option value="federal_register">Federal Register</option>
+                {SOURCES.map((s) => (
+                  <option key={s.value} value={s.value}>{s.label}</option>
+                ))}
               </select>
             </div>
             <div>
@@ -163,11 +227,23 @@ export default function Coverage() {
                 value={planPages}
                 onChange={(e) => setPlanPages(Number(e.target.value))}
                 min={1}
+                max={50}
                 className="px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 w-20"
               />
             </div>
-            <div className="flex items-end">
-              <label className="flex items-center gap-2 text-sm">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Page Size</label>
+              <input
+                type="number"
+                value={planPageSize}
+                onChange={(e) => setPlanPageSize(Number(e.target.value))}
+                min={1}
+                max={200}
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 w-20"
+              />
+            </div>
+            <div className="flex items-end gap-3">
+              <label className="flex items-center gap-1.5 text-sm">
                 <input
                   type="checkbox"
                   checked={planDryRun}
@@ -176,16 +252,34 @@ export default function Coverage() {
                 />
                 Dry Run
               </label>
+              <label className="flex items-center gap-1.5 text-sm">
+                <input
+                  type="checkbox"
+                  checked={planForceRefresh}
+                  onChange={(e) => setPlanForceRefresh(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                Force Refresh
+              </label>
             </div>
-            <div className="flex items-end">
-              <button
-                type="submit"
-                disabled={planSubmitting}
-                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors"
-              >
-                {planSubmitting ? 'Creating...' : 'Create Plan'}
-              </button>
-            </div>
+          </div>
+
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={handlePreviewPlan}
+              disabled={planSubmitting}
+              className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 disabled:opacity-50 transition-colors"
+            >
+              Preview Plan
+            </button>
+            <button
+              type="submit"
+              disabled={planSubmitting}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors"
+            >
+              {planSubmitting ? 'Running...' : planDryRun ? 'Run Dry Run' : 'Run Backfill'}
+            </button>
           </div>
         </form>
 
@@ -205,6 +299,34 @@ export default function Coverage() {
               ))}
             </ul>
             <p className="mt-2 text-xs text-yellow-700">{planResult.warning}</p>
+          </div>
+        )}
+
+        {runResult && (
+          <div className="mt-4 p-4 rounded border border-blue-200 bg-blue-50">
+            <h4 className="text-sm font-semibold text-gray-700 mb-2">
+              Run {runResult.dry_run ? 'Dry Run' : 'Complete'} — Result
+            </h4>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <div><span className="text-gray-500">Run ID:</span><p className="font-medium">{runResult.run_id}</p></div>
+              <div><span className="text-gray-500">Status:</span>
+                <p className={`font-medium ${runResult.status === 'failed' ? 'text-red-600' : 'text-green-600'}`}>
+                  {runResult.status}
+                </p>
+              </div>
+              <div><span className="text-gray-500">Records Found:</span><p className="font-medium">{runResult.records_found}</p></div>
+              <div><span className="text-gray-500">New Documents:</span><p className="font-medium">{runResult.new_documents}</p></div>
+              <div><span className="text-gray-500">Duplicates Skipped:</span><p className="font-medium">{runResult.duplicates_skipped}</p></div>
+              <div><span className="text-gray-500">Failed:</span><p className="font-medium">{runResult.failed_documents}</p></div>
+              <div><span className="text-gray-500">Preserved:</span><p className="font-medium">{runResult.records_preserved}</p></div>
+              <div><span className="text-gray-500">Extracted:</span><p className="font-medium">{runResult.records_extracted}</p></div>
+            </div>
+            {runResult.errors.length > 0 && (
+              <div className="mt-2 text-xs text-red-600">
+                {runResult.errors.map((e, i) => <p key={i}>{e}</p>)}
+              </div>
+            )}
+            <p className="mt-3 text-xs text-yellow-700">{runResult.warning}</p>
           </div>
         )}
       </div>

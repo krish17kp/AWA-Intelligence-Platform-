@@ -1,620 +1,384 @@
-You are working on the AWA Intelligence Platform repository.
+You are working on the AWA Intelligence Platform.
 
-Read this carefully before coding.
+Current completed state from the latest handoff:
 
-Current state from the handoff:
+- Backend product visibility APIs are implemented.
+- Frontend React + Vite + TypeScript + Tailwind product skeleton is built.
+- Pages implemented:
+  - /dashboard
+  - /documents
+  - /documents/:id
+  - /ingestion
+  - /coverage
+  - /future-modules
 
-- Backend pipeline foundation already works.
-- Backend compiles and runs.
-- All 4 ingestion adapters work:
-  - APHIS inspections
-  - APHIS enforcement
-  - eCFR
-  - Federal Register
+- Backend endpoints implemented:
+  - GET /health
+  - GET /stats
+  - GET /documents
+  - GET /documents/{id}
+  - GET /documents/{id}/text
+  - GET /documents/{id}/raw
+  - GET /ingestion/runs
+  - GET /coverage
+  - POST /backfill/plan
 
-- Deduplication via canonical_key works.
-- Content hashing works.
-- Text extraction works for PDF/XML/JSON.
-- 37 documents currently have extracted text.
-- Railway Dockerfile deployment works.
-- S3-compatible storage with local fallback exists.
-- Alembic migration system exists.
-- API key auth on ingestion endpoints exists.
-- GET /ingestion/summary exists as a basic metrics endpoint.
-
-Critical instruction:
-Do NOT rebuild or break the working ingestion pipeline.
-Do NOT remove existing routes.
-Do NOT rename existing DB columns destructively.
-Do NOT introduce fake frontend data.
-Do NOT create dummy documents.
-Do NOT claim full historical backfill is complete.
+- Existing ingestion pipeline must not be broken.
+- Existing frontend must not be rebuilt from scratch.
+- Full historical APHIS backfill is NOT complete yet.
+- /backfill/plan currently only creates a plan and does not run scraping.
+- /coverage currently infers status and does not use real coverage_snapshots.
+- coverage_snapshots table does not exist yet.
+- ingestion_events table does not exist yet.
+- /ingestion/runs currently returns run_type/date ranges as null and duplicates/failed counts as 0.
+- Existing source_documents may have canonical_key=NULL for older pre-migration records.
+- OCR/entity extraction/facility profiles/AI/case binder are not part of this task.
 
 Main goal:
-The frontend has not been developed at all. Build the frontend product skeleton from zero and add only the minimum backend API contract needed for the frontend to show real data.
+Implement controlled historical backfill execution and real coverage tracking without breaking the existing working pipeline or frontend.
 
-Use the Expanded Product Brief direction:
+Source of truth:
+Use the Expanded Product Brief direction only:
 
-- The product is a defensibility-first evidence and analytics platform.
-- Source records must remain preserved.
-- Records should show provenance, hash, source URL, extraction status, and review visibility.
-- AI is not part of this task today.
-- Graph/Neo4j is not part of this task today.
-- Dagster is not part of this task today unless existing code already requires it.
-- Focus on dashboard, document repository, ingestion visibility, and coverage visibility.
+- source preservation before extraction
+- provenance and hashes are mandatory
+- backfill must be auditable
+- do not claim full historical coverage unless run logs and coverage snapshots prove it
+- no AI scraping
+- no fake statistics
+- no dummy data
 
-TASK 1: Backend API contract for frontend
+TASK 1: Add database tables and safe columns
 
-A. Enhance GET /health
+Create an Alembic migration.
 
-Current file:
-backend/app/api/routes/health.py
-
-Current behavior:
-Returns static status only.
-
-Update it to return:
-
-- status: "ok" or "degraded"
-- service
-- version if available from settings
-- database: "ok" or error message
-- storage: "ok", "unknown", or error message
-- timestamp
-
-Do not make storage check fail the whole endpoint if S3 config is missing. Return "unknown" if not configured.
-
-B. Create GET /stats
-
-Create:
-backend/app/api/routes/stats.py
-
-Register it in:
-backend/app/main.py
-
-This endpoint must return real DB-derived values only.
-
-Return:
-
-- total_documents
-- total_raw_files_preserved
-- total_documents_with_text
-- total_duplicates_skipped
-- total_failed_documents
-- total_ingestion_runs
-- latest_ingestion_run
-- extraction_success_rate
-- qa_needed_count
-
-Implementation guidance:
-
-- Use source_documents for total_documents.
-- Use source_documents.storage_path not null for total_raw_files_preserved.
-- Use document_text_blocks if available for total_documents_with_text.
-- If duplicate count is not stored yet, return 0 but add a clear field:
-  duplicate_tracking_note: "Duplicate count not fully tracked yet; dedupe currently uses canonical_key/content_hash."
-- If failed document count is not available, derive from ingestion_runs if possible, otherwise return 0 with a note.
-- qa_needed_count can return 0 until QA queue exists.
-- latest_ingestion_run should return latest run from ingestion_runs if available.
-- extraction_success_rate = total_documents_with_text / total_documents \* 100, rounded to 2 decimals. If total_documents is 0, return 0.
-
-C. Enhance GET /documents
-
-Current file:
-backend/app/api/routes/documents.py
-
-Keep existing behavior but add frontend-friendly parameters:
-
-- page: int default 1
-- page_size: int default 25
-- q: optional string
-- source_type: optional string
-- extraction_status: optional string
-- date_from: optional date
-- date_to: optional date
-
-Return paginated response:
-{
-"items": [...],
-"page": 1,
-"page_size": 25,
-"total": 37
-}
-
-Each item must include:
+A. Create ingestion_events table:
 
 - id
-- title, mapped from document_title
-- source_name
-- source_type
-- source_url
-- document_date
-- retrieved_at
-- content_hash
-- canonical_key
-- raw_storage_path, mapped from storage_path
-- text_extracted boolean
-- extraction_status
-- duplicate_of if available, else null
+- run_id nullable FK to ingestion_runs.id
+- document_id nullable FK to source_documents.id
+- event_type string, required
+- message text, nullable
+- payload json/jsonb nullable
+- created_at timestamp default now
 
-Important:
-If extraction_status column does not exist yet, do not crash. Compute:
+Event types should support at least:
 
-- "extracted" if document has text blocks
-- "pending" if no text blocks
-  If duplicate_of column does not exist, return null.
+- run_started
+- listing_fetched
+- document_seen
+- duplicate_skipped
+- raw_preserved
+- text_extracted
+- document_failed
+- run_completed
+- run_failed
 
-D. Keep GET /documents/{id}
+B. Create coverage_snapshots table:
 
-Do not break this endpoint.
-Make sure the response is frontend-friendly:
+- id
+- source string, required
+- source_type string nullable
+- date_range_start nullable date/datetime
+- date_range_end nullable date/datetime
+- records_found integer default 0
+- records_preserved integer default 0
+- records_extracted integer default 0
+- duplicates_skipped integer default 0
+- failed_documents integer default 0
+- status string default "partial"
+- notes text nullable
+- created_at timestamp default now
 
-- include title alias for document_title
-- include raw_storage_path alias for storage_path
-- include raw_metadata_json
+C. Add safe nullable/default columns to ingestion_runs if they do not exist:
 
-E. Create GET /documents/{id}/text
+- run_type string default "manual"
+- date_range_start nullable date/datetime
+- date_range_end nullable date/datetime
+- new_documents integer default 0
+- duplicates_skipped integer default 0
+- failed_documents integer default 0
 
-Return extracted text from document_text_blocks.
+Do not rename existing columns.
+Do not remove records_saved/run_status/source_name.
+API can map old and new fields.
 
-Response:
-{
-"document_id": "...",
-"text_available": true,
-"block_count": 3,
-"extracted_text": "...",
-"extraction_status": "extracted"
-}
+D. Add safe nullable/default columns to source_documents if they do not exist:
 
-If no text exists:
-{
-"document_id": "...",
-"text_available": false,
-"block_count": 0,
-"extracted_text": "",
-"extraction_status": "pending"
-}
+- duplicate_of nullable self-reference if simple to add
+- extraction_status string default "pending"
+- extraction_method nullable string
+- text_storage_path nullable string
 
-F. Create GET /documents/{id}/raw
+Do not break existing records.
+For existing records with text blocks, set extraction_status = "extracted" if possible.
 
-Do not overcomplicate signed URLs today.
+TASK 2: Implement real controlled backfill run endpoint
 
-Return:
-{
-"document_id": "...",
-"storage_available": true/false,
-"raw_storage_path": "...",
-"source_url": "...",
-"download_url": null,
-"note": "Signed URL not implemented yet; use source_url or storage path."
-}
+Create or enhance backend route:
 
-If storage path exists, storage_available true. If not, false.
+POST /backfill/run
 
-G. Add alias GET /ingestion/runs
-
-Current code has /ingestion-runs.
-Add /ingestion/runs as an alias without removing /ingestion-runs.
-
-Return frontend-friendly fields:
-
-- run_id
-- source
-- run_type
-- status
-- started_at
-- completed_at
-- records_found
-- new_documents
-- duplicates_skipped
-- failed_documents
-- date_range_start
-- date_range_end
-- error_message
-
-Map existing fields safely:
-
-- source_name -> source
-- run_status -> status
-- finished_at -> completed_at
-- records_saved -> new_documents if new_documents field does not exist
-- missing fields should return null or 0, not crash.
-
-H. Create GET /coverage
-
-Create:
-backend/app/api/routes/coverage.py
-
-Register it in main.py.
-
-This endpoint should honestly summarize current historical coverage.
-
-Return:
-{
-"historical_backfill_status": "partial",
-"message": "Full historical APHIS coverage is not complete yet. Current data reflects available ingestion runs and stored documents only.",
-"total_documents": 37,
-"total_documents_with_text": 37,
-"sources_attempted": [...],
-"date_ranges_attempted": [...],
-"total_records_by_source": {...},
-"last_successful_run": {...},
-"coverage_snapshots": []
-}
-
-If coverage_snapshots table does not exist, do not fail. Infer from source_documents and ingestion_runs and return empty coverage_snapshots.
-
-I. Create POST /backfill/plan
-
-Create:
-backend/app/api/routes/backfill.py
-
-This endpoint does NOT run scraping.
+This endpoint should execute a controlled backfill run.
 
 Input:
 {
 "source": "aphis_inspections",
-"start_date": "2020-01-01",
+"start_date": "2026-01-01",
 "end_date": "2026-06-13",
-"max_pages": 10,
-"dry_run": true
+"max_pages": 2,
+"page_size": 50,
+"dry_run": false,
+"force_refresh": false
 }
+
+Required behavior:
+
+- Create an ingestion_runs row at start.
+- run_type should be "backfill".
+- Save source, date_range_start, date_range_end.
+- Create ingestion_events row: run_started.
+- Fetch listing using the existing adapter/service for the selected source.
+- Do not create a totally separate scraper if working adapters already exist.
+- Respect max_pages/page_size.
+- For every record found:
+  - compute or read canonical_key
+  - compute content_hash when raw content is available
+  - check duplicate by canonical_key and/or content_hash
+  - if duplicate and force_refresh is false:
+    - skip it
+    - increment duplicates_skipped
+    - create ingestion_event duplicate_skipped
+
+  - if new:
+    - preserve raw source first
+    - store metadata in source_documents
+    - extract text using existing text extraction service if available
+    - increment new_documents / records_preserved / records_extracted accordingly
+    - create ingestion_events for document_seen, raw_preserved, text_extracted
+
+  - if failure:
+    - increment failed_documents
+    - create ingestion_event document_failed with error payload
+
+- On completion:
+  - update ingestion_runs status completed
+  - write counts:
+    - records_found
+    - new_documents
+    - duplicates_skipped
+    - failed_documents
+
+  - create coverage_snapshots row
+  - create ingestion_event run_completed
+
+- On exception:
+  - update ingestion_runs status failed
+  - write error_message
+  - create ingestion_event run_failed
+  - return useful error response without hiding the failure.
+
+Important:
+
+- If dry_run = true, do not preserve raw files or insert source_documents.
+- In dry_run, still return expected counts if possible and planned actions.
+- Do not mark historical_backfill_status complete automatically.
+- Mark status partial unless the code has a real source coverage completion check.
+
+TASK 3: Source support
+
+Support these source names if existing adapters allow:
+
+- aphis_inspections
+- aphis_enforcement
+- federal_register
+- ecfr
+
+If a source is unsupported, return 400 with supported source list.
+
+Do not invent successful data for unsupported sources.
+
+TASK 4: Enhance /coverage to use real coverage_snapshots
+
+Update GET /coverage.
+
+It should now:
+
+- read coverage_snapshots if table exists
+- include latest snapshots
+- include total records by source
+- include date ranges attempted
+- include last successful backfill run
+- include historical_backfill_status
+
+Status logic:
+
+- not_started: no source_documents and no coverage_snapshots
+- partial: any documents/snapshots exist but no verified full-source completion
+- complete: only if explicit completion flag/check exists later. For now, do not return complete.
 
 Return:
 {
-"source": "...",
-"start_date": "...",
-"end_date": "...",
-"max_pages": 10,
-"dry_run": true,
-"planned_stages": [
-"fetch listing",
-"preserve raw source",
-"compute content hash",
-"dedupe by canonical_key/content_hash",
-"extract text/OCR",
-"store metadata",
-"update coverage"
-],
-"warning": "This endpoint only creates a plan. Full historical backfill is not complete until run logs and coverage records prove it."
+"historical_backfill_status": "partial",
+"message": "Full historical APHIS coverage is not complete yet. Current data reflects completed backfill runs and coverage snapshots only.",
+"sources_attempted": [...],
+"date_ranges_attempted": [...],
+"total_records_by_source": {...},
+"latest_coverage_snapshots": [...],
+"last_successful_run": {...},
+"known_limitations": [...]
 }
 
-TASK 2: Avoid risky migrations unless necessary
+TASK 5: Enhance /ingestion/runs
 
-The handoff says new schema columns are missing, but for today the frontend can work without forcing all schema changes.
+Update /ingestion/runs to return real new fields if migration added them:
 
-Do this:
+- run_type
+- date_range_start
+- date_range_end
+- new_documents
+- duplicates_skipped
+- failed_documents
 
-- Prefer API-level computed fields where possible.
-- Do not add destructive migrations.
-- Only add migrations if they are required for code to run.
-- If adding migration, make it backward-compatible and nullable/defaulted.
-- Do not rename columns like document_title or source_name.
-- Use aliases in API response instead.
+Fallback to old fields only if new fields are null.
 
-Reason:
-The priority is frontend product visibility. Schema hardening can continue after the frontend is alive.
+TASK 6: Add GET /ingestion/runs/{run_id}/events
 
-TASK 3: Build frontend from zero
+Create endpoint:
+GET /ingestion/runs/{run_id}/events
 
-The frontend directory currently contains only .gitkeep.
+Return events for a run:
 
-Create React + Vite + TypeScript + Tailwind frontend.
+- id
+- event_type
+- message
+- document_id
+- payload
+- created_at
 
-Required files:
+This will help debugging and demo traceability.
 
-- frontend/package.json
-- frontend/index.html
-- frontend/vite.config.ts
-- frontend/tsconfig.json
-- frontend/tailwind.config.js
-- frontend/postcss.config.js
-- frontend/src/main.tsx
-- frontend/src/App.tsx
-- frontend/src/api/client.ts
-- frontend/src/components/Layout.tsx
-- frontend/src/components/Card.tsx
-- frontend/src/components/DataTable.tsx
-- frontend/src/components/StateMessage.tsx
-- frontend/src/pages/Dashboard.tsx
-- frontend/src/pages/Documents.tsx
-- frontend/src/pages/DocumentDetail.tsx
-- frontend/src/pages/Ingestion.tsx
-- frontend/src/pages/Coverage.tsx
-- frontend/src/pages/FutureModules.tsx
-- frontend/src/index.css
+TASK 7: Add frontend support for running controlled backfill
 
-Use:
+Do not rebuild frontend.
 
-- React
-- Vite
-- TypeScript
-- Tailwind CSS
-- react-router-dom
+Update existing Coverage page.
 
-TASK 4: Frontend API client
+Add section:
+"Run Controlled Backfill"
 
-Create frontend/src/api/client.ts
+Form fields:
 
-API base URL:
+- source dropdown:
+  - aphis_inspections
+  - aphis_enforcement
+  - federal_register
+  - ecfr
 
-- Use import.meta.env.VITE_API_BASE_URL
-- Default fallback: http://localhost:8000
-
-Create functions:
-
-- getHealth()
-- getStats()
-- getDocuments(params)
-- getDocument(id)
-- getDocumentText(id)
-- getDocumentRaw(id)
-- getIngestionRuns()
-- getCoverage()
-- createBackfillPlan(payload)
-
-Handle errors cleanly.
-Do not crash pages if endpoint returns missing fields.
-
-TASK 5: Frontend layout
-
-Create a clean dashboard-style layout:
-
-- Left sidebar
-- Top header
-- Main content area
-
-Sidebar links:
-
-- Dashboard
-- Documents
-- Ingestion
-- Coverage
-- Future Modules
-
-Default route:
-
-- / redirects to /dashboard
-
-Use a simple professional design:
-
-- light background
-- cards
-- tables
-- badges
-- readable spacing
-- no excessive animations
-- no fake charts unless values are real
-
-TASK 6: Dashboard page
-
-Route:
-/dashboard
-
-Call:
-GET /stats
-
-Show metric cards:
-
-- Total Documents
-- Raw Files Preserved
-- Documents With Text
-- Duplicates Skipped
-- Failed Documents
-- Ingestion Runs
-- Extraction Success Rate
-- QA Needed
-
-Also show:
-
-- Latest ingestion run card
-- Backend health summary if easy to include
-
-Rules:
-
-- If data is missing, show "Not available yet".
-- No hardcoded fake stats.
-- If API fails, show error state with retry.
-
-TASK 7: Documents page
-
-Route:
-/documents
-
-Call:
-GET /documents
-
-Features:
-
-- Search input q
-- Source type filter
-- Extraction status filter
-- Page/page_size support
-- Table columns:
-  - Title
-  - Source Type
-  - Source Name
-  - Retrieved At
-  - Hash short version
-  - Extraction Status badge
-  - Raw Preserved yes/no
-  - View button
-
-Click View goes to:
-/documents/:id
-
-If no documents, show empty state:
-"No documents available yet. Run ingestion to populate the repository."
-
-TASK 8: Document detail page
-
-Route:
-/documents/:id
-
-Call:
-
-- GET /documents/{id}
-- GET /documents/{id}/text
-- GET /documents/{id}/raw
-
-Show:
-
-- Title
-- Source name/type
-- Source URL as clickable link
-- Document date
-- Retrieved timestamp
-- Canonical key
-- Content hash
-- Raw storage path
-- Storage availability
-- Extracted text preview
-- Full extracted text section with scrollable box
-- Metadata JSON panel
-
-No AI summary on this page yet.
-No fake entity extraction yet.
-
-TASK 9: Ingestion page
-
-Route:
-/ingestion
-
-Call:
-GET /ingestion/runs
-
-Show table:
-
-- Run ID
-- Source
-- Run Type
-- Status
-- Started At
-- Completed At
-- Records Found
-- New Documents
-- Duplicates Skipped
-- Failed Documents
-- Error Message
-
-If /ingestion/runs fails but /ingestion-runs works, the backend alias should fix this. Do not make frontend call old path unless absolutely necessary.
-
-TASK 10: Coverage page
-
-Route:
-/coverage
-
-Call:
-GET /coverage
-
-Show:
-
-- Historical backfill status
-- Big warning box:
-  "Full historical APHIS coverage is not complete yet. Current data reflects available ingestion runs and stored documents only."
-- Total documents
-- Documents with text
-- Sources attempted
-- Date ranges attempted
-- Records by source
-- Last successful run
-- Coverage snapshots if available
-
-Also add Backfill Plan form:
-
-- source
 - start_date
 - end_date
 - max_pages
+- page_size
 - dry_run checkbox
-- submit calls POST /backfill/plan
-- display planned stages returned by API
+- force_refresh checkbox
 
-Important:
-This page must not imply historical data is complete.
+Buttons:
 
-TASK 11: Future modules page
+- Preview Plan: calls POST /backfill/plan
+- Run Backfill: calls POST /backfill/run
 
-Route:
-/future-modules
+After run:
 
-Show disabled cards:
+- show run summary:
+  - run_id
+  - status
+  - records_found
+  - new_documents
+  - duplicates_skipped
+  - failed_documents
 
-- OCR + QA queue
-- Entity extraction
-- Facility profiles
-- Inspector analytics
-- AI research assistant
-- Case/evidence binder
-- FOIA
-- Public portal
-- Graph intelligence
+- show warning:
+  "This does not mean full historical coverage is complete. Coverage is partial until source/date coverage is validated."
 
-Each card should have:
+Update Ingestion page:
 
-- status: "Planned"
-- short reason
-- no fake links to unfinished pages
+- Add "View Events" action for each run.
+- On click, call GET /ingestion/runs/{run_id}/events
+- Show event timeline/table:
+  - event type
+  - message
+  - document id
+  - timestamp
 
-TASK 12: Styling and states
+TASK 8: Add API client functions
 
-Every page must include:
+Update frontend/src/api/client.ts:
 
-- loading state
-- error state
-- empty state
-- fallback text for missing fields
+- runBackfill(payload)
+- getIngestionRunEvents(runId)
 
-Use badges:
+TASK 9: Backfill safety rules
 
-- extracted = green
-- pending = yellow/gray
-- failed = red
-- partial = yellow
-- complete = green
-- not_started = gray
+Strictly follow:
 
-TASK 13: Build/test commands
+- default max_pages should be small, for example 2 or 5
+- do not accidentally fetch millions of pages
+- no infinite loops
+- log failures instead of crashing silently
+- do not delete existing documents
+- do not overwrite raw preserved source unless force_refresh is true
+- do not claim completion
+- do not create fake snapshots
+- do not create dummy documents
 
-Add frontend scripts:
+TASK 10: Verification
 
-- npm run dev
-- npm run build
-- npm run preview
-
-Backend:
-
-- ensure python compile check passes
-- ensure all routers import cleanly
-
-Before finishing, run:
+Run:
 
 - backend compile check
-- frontend npm install
-- frontend npm run build
+- alembic migration
+- frontend TypeScript check
+- frontend build
 
-If dependency installation is blocked by environment, still create correct package.json and mention the command needed.
+Manual API tests:
 
-TASK 14: Acceptance criteria
+- GET /coverage
+- POST /backfill/plan
+- POST /backfill/run with dry_run=true
+- POST /backfill/run with very small real run, max_pages=1
+- GET /ingestion/runs
+- GET /ingestion/runs/{run_id}/events
+- GET /coverage again and confirm snapshot updated
+
+Frontend tests:
+
+- Open /coverage
+- Preview plan
+- Run dry run
+- Run small real backfill
+- Confirm run appears in /ingestion
+- Confirm events can be viewed
+- Confirm /documents count updates only when new documents are actually saved
+
+TASK 11: Acceptance criteria
 
 Complete only when:
 
-- frontend directory is no longer empty
-- frontend has React/Vite/TypeScript/Tailwind scaffold
-- /dashboard exists and calls real /stats
-- /documents exists and displays real API documents
-- /documents/:id opens detail and text/raw info
-- /ingestion exists and displays run history
-- /coverage exists and clearly says historical backfill is not complete
-- /future-modules exists
-- backend has /stats
-- backend has /documents/{id}/text
-- backend has /documents/{id}/raw
-- backend has /coverage
-- backend has /backfill/plan
-- backend has /ingestion/runs alias
-- no fake data
-- existing ingestion pipeline is not broken
+- ingestion_events table exists
+- coverage_snapshots table exists
+- /backfill/run exists
+- /backfill/run supports dry_run and real controlled run
+- /backfill/run creates ingestion run records
+- /backfill/run creates ingestion events
+- /backfill/run creates coverage snapshot on completion
+- /coverage reads real coverage snapshots
+- /ingestion/runs shows real backfill counts
+- /ingestion/runs/{run_id}/events works
+- Coverage frontend can preview and run controlled backfill
+- Ingestion frontend can show run events
+- No existing frontend pages are broken
+- No existing ingestion adapters are broken
+- No fake historical completion claim is made
 
 Commit message:
-"Build frontend product skeleton and API visibility endpoints"
+"Add controlled historical backfill execution and coverage tracking"

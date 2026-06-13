@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import Column, DateTime, Integer, String, Text
 from sqlalchemy.sql import func
 
@@ -17,6 +19,13 @@ class IngestionRun(Base):
 
     records_found = Column(Integer, nullable=False, default=0)
     records_saved = Column(Integer, nullable=False, default=0)
+
+    run_type = Column(String(50), nullable=True, default="manual")
+    date_range_start = Column(DateTime(timezone=True), nullable=True)
+    date_range_end = Column(DateTime(timezone=True), nullable=True)
+    new_documents = Column(Integer, nullable=False, default=0)
+    duplicates_skipped = Column(Integer, nullable=False, default=0)
+    failed_documents = Column(Integer, nullable=False, default=0)
 
     error_message = Column(Text, nullable=True)
 
