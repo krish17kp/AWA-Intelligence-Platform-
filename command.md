@@ -1,241 +1,620 @@
-Before making any changes, read `command.md` fully.
+You are working on the AWA Intelligence Platform repository.
 
-We have completed Railway + n8n production ingestion verification. Now fix the remaining production data-quality issues.
+Read this carefully before coding.
 
-Current verified production state:
+Current state from the handoff:
 
-- `source_documents` has 37 records.
-- Counts:
-  - `aphis_public_search_tool / awa_enforcement_action = 10`
-  - `aphis_public_search_tool / awa_inspection_report = 25`
-  - `ecfr / regulatory_citation_mapping = 1`
-  - `federal_register / Rule = 1`
+- Backend pipeline foundation already works.
+- Backend compiles and runs.
+- All 4 ingestion adapters work:
+  - APHIS inspections
+  - APHIS enforcement
+  - eCFR
+  - Federal Register
 
-- Railway Bucket stores raw files under:
-  - `sources/aphis_public_search_tool/`
-  - `sources/ecfr/`
-  - `sources/federal_register/`
+- Deduplication via canonical_key works.
+- Content hashing works.
+- Text extraction works for PDF/XML/JSON.
+- 37 documents currently have extracted text.
+- Railway Dockerfile deployment works.
+- S3-compatible storage with local fallback exists.
+- Alembic migration system exists.
+- API key auth on ingestion endpoints exists.
+- GET /ingestion/summary exists as a basic metrics endpoint.
 
-- Missing metadata check is clean:
-  - missing source_url = 0
-  - missing storage_path = 0
-  - missing content_hash = 0
-  - missing file_size = 0
-
-- Duplicate checks are clean:
-  - duplicate canonical_key = 0
-  - duplicate content_hash = 0
-  - documents without canonical_key = 0
-
-- Problem: `document_text_blocks` is still empty:
-  - `SELECT COUNT(*) FROM document_text_blocks;` returns `0`
-
-- Problem: APHIS Public Search Tool manually shows 29 inspection rows for Equitech-Bio Inc. certificate `74-B-0345`, but production has only 25 inspection reports total and only a partial subset for Equitech.
-- Problem: APHIS enforcement saved 10 records, but repeated verification later may return `records_found=0` instead of finding the same 10 and skipping duplicates.
+Critical instruction:
+Do NOT rebuild or break the working ingestion pipeline.
+Do NOT remove existing routes.
+Do NOT rename existing DB columns destructively.
+Do NOT introduce fake frontend data.
+Do NOT create dummy documents.
+Do NOT claim full historical backfill is complete.
 
 Main goal:
-Fix production data-quality gaps after ingestion:
+The frontend has not been developed at all. Build the frontend product skeleton from zero and add only the minimum backend API contract needed for the frontend to show real data.
 
-1. APHIS inspection pagination / record limit.
-2. Text extraction into `document_text_blocks`.
-3. APHIS enforcement repeated-run consistency.
-4. Backward-compatible API naming for `source_type` / `source_subtype`.
+Use the Expanded Product Brief direction:
 
-Do not delete production data.
-Do not wipe Railway Postgres.
-Do not change Railway Bucket layout unless necessary.
-Do not build frontend.
-Do not add AI.
-Do not add Neo4j.
-Do not add Dagster.
-Do not add Celery.
+- The product is a defensibility-first evidence and analytics platform.
+- Source records must remain preserved.
+- Records should show provenance, hash, source URL, extraction status, and review visibility.
+- AI is not part of this task today.
+- Graph/Neo4j is not part of this task today.
+- Dagster is not part of this task today unless existing code already requires it.
+- Focus on dashboard, document repository, ingestion visibility, and coverage visibility.
 
-Task 1 — Fix APHIS inspection pagination / partial ingestion:
+TASK 1: Backend API contract for frontend
 
-- Inspect `backend/app/services/ingestion/aphis_adapter.py` and any related APHIS scraping scripts.
-- Remove hardcoded limits that stop at 25 records or only first visible rows.
-- The scraper must paginate or scroll through all available APHIS inspection rows for the configured search.
-- Manual APHIS check showed Equitech-Bio Inc. certificate `74-B-0345` has 29 rows in the official APHIS Public Search Tool.
-- The ingestion response must report accurate:
-  - `records_found`
-  - `records_saved`
-  - `duplicates_skipped`
-  - `changed_records`
-  - `errors`
+A. Enhance GET /health
 
-- Add guardrails like `max_pages` or `max_rows` only as safety limits, not as a hidden production limit.
-- If APHIS pagination cannot be fully solved in one pass, return clear errors/warnings instead of silently saving partial data.
+Current file:
+backend/app/api/routes/health.py
 
-Task 2 — Wire text extraction into ingestion:
-Use existing table `document_text_blocks`.
+Current behavior:
+Returns static status only.
 
-Current schema has:
+Update it to return:
 
-- `id`
-- `source_document_id`
-- `page_number`
-- `block_index`
-- `text`
-- `confidence`
-- `created_at`
+- status: "ok" or "degraded"
+- service
+- version if available from settings
+- database: "ok" or error message
+- storage: "ok", "unknown", or error message
+- timestamp
 
-Implement extraction for existing source types:
+Do not make storage check fail the whole endpoint if S3 config is missing. Return "unknown" if not configured.
 
-- PDF files:
-  - Use a pure Python PDF text extraction library, preferably `pypdf`.
-  - Extract text page by page.
-  - Insert one or more text blocks per page.
-  - Use `page_number` for PDF pages.
-  - Use `confidence = 1.0` for normal embedded-text extraction.
-  - If PDF text is empty, record an error/warning but do not crash ingestion.
+B. Create GET /stats
 
-- XML files:
-  - Extract readable text from XML using Python standard library or safe parser.
-  - Chunk into text blocks.
-  - Use `page_number = 1`.
-  - Use `confidence = 1.0`.
+Create:
+backend/app/api/routes/stats.py
 
-- JSON files:
-  - Extract useful JSON text/fields or pretty-printed JSON.
-  - Chunk into text blocks.
-  - Use `page_number = 1`.
-  - Use `confidence = 1.0`.
+Register it in:
+backend/app/main.py
+
+This endpoint must return real DB-derived values only.
+
+Return:
+
+- total_documents
+- total_raw_files_preserved
+- total_documents_with_text
+- total_duplicates_skipped
+- total_failed_documents
+- total_ingestion_runs
+- latest_ingestion_run
+- extraction_success_rate
+- qa_needed_count
+
+Implementation guidance:
+
+- Use source_documents for total_documents.
+- Use source_documents.storage_path not null for total_raw_files_preserved.
+- Use document_text_blocks if available for total_documents_with_text.
+- If duplicate count is not stored yet, return 0 but add a clear field:
+  duplicate_tracking_note: "Duplicate count not fully tracked yet; dedupe currently uses canonical_key/content_hash."
+- If failed document count is not available, derive from ingestion_runs if possible, otherwise return 0 with a note.
+- qa_needed_count can return 0 until QA queue exists.
+- latest_ingestion_run should return latest run from ingestion_runs if available.
+- extraction_success_rate = total_documents_with_text / total_documents \* 100, rounded to 2 decimals. If total_documents is 0, return 0.
+
+C. Enhance GET /documents
+
+Current file:
+backend/app/api/routes/documents.py
+
+Keep existing behavior but add frontend-friendly parameters:
+
+- page: int default 1
+- page_size: int default 25
+- q: optional string
+- source_type: optional string
+- extraction_status: optional string
+- date_from: optional date
+- date_to: optional date
+
+Return paginated response:
+{
+"items": [...],
+"page": 1,
+"page_size": 25,
+"total": 37
+}
+
+Each item must include:
+
+- id
+- title, mapped from document_title
+- source_name
+- source_type
+- source_url
+- document_date
+- retrieved_at
+- content_hash
+- canonical_key
+- raw_storage_path, mapped from storage_path
+- text_extracted boolean
+- extraction_status
+- duplicate_of if available, else null
 
 Important:
+If extraction_status column does not exist yet, do not crash. Compute:
 
-- Extraction must be idempotent.
-- If a source document already has text blocks, do not insert duplicates.
-- Extraction should run automatically after a new source document is saved.
-- Also create a backfill path for existing 37 production documents.
+- "extracted" if document has text blocks
+- "pending" if no text blocks
+  If duplicate_of column does not exist, return null.
 
-Task 3 — Add storage read support if missing:
+D. Keep GET /documents/{id}
 
-- If `storage_service.py` only supports saving raw bytes, add a safe `read_raw_bytes(storage_path)` function.
-- It must support Railway Bucket/S3 storage paths and local storage.
-- For Railway Bucket, use existing S3-compatible env vars:
-  - `S3_ENDPOINT_URL`
-  - `S3_BUCKET_NAME`
-  - `AWS_ACCESS_KEY_ID`
-  - `AWS_SECRET_ACCESS_KEY`
-  - `AWS_DEFAULT_REGION`
+Do not break this endpoint.
+Make sure the response is frontend-friendly:
 
-- If reading from storage fails, fallback to downloading from `source_url` only as a fallback and log that fallback clearly.
+- include title alias for document_title
+- include raw_storage_path alias for storage_path
+- include raw_metadata_json
 
-Task 4 — Add protected extraction backfill endpoint:
-Create a backend endpoint like:
+E. Create GET /documents/{id}/text
 
-`POST /extraction/backfill/run`
+Return extracted text from document_text_blocks.
 
-Security:
-
-- Require the same `x-api-key` / `INGESTION_API_KEY` protection used by ingestion endpoints.
-
-Behavior:
-
-- Find all `source_documents` without matching `document_text_blocks`.
-- Extract text from raw stored file.
-- Insert text blocks.
-- Do not duplicate text blocks.
-- Return JSON:
-
-```json
+Response:
 {
-  "status": "success",
-  "documents_checked": 37,
-  "documents_extracted": 37,
-  "documents_skipped": 0,
-  "text_blocks_created": 123,
-  "errors": []
+"document_id": "...",
+"text_available": true,
+"block_count": 3,
+"extracted_text": "...",
+"extraction_status": "extracted"
 }
-```
 
-If some files fail extraction, endpoint should still complete and include errors array.
+If no text exists:
+{
+"document_id": "...",
+"text_available": false,
+"block_count": 0,
+"extracted_text": "",
+"extraction_status": "pending"
+}
 
-Task 5 — Add local script:
+F. Create GET /documents/{id}/raw
+
+Do not overcomplicate signed URLs today.
+
+Return:
+{
+"document_id": "...",
+"storage_available": true/false,
+"raw_storage_path": "...",
+"source_url": "...",
+"download_url": null,
+"note": "Signed URL not implemented yet; use source_url or storage path."
+}
+
+If storage path exists, storage_available true. If not, false.
+
+G. Add alias GET /ingestion/runs
+
+Current code has /ingestion-runs.
+Add /ingestion/runs as an alias without removing /ingestion-runs.
+
+Return frontend-friendly fields:
+
+- run_id
+- source
+- run_type
+- status
+- started_at
+- completed_at
+- records_found
+- new_documents
+- duplicates_skipped
+- failed_documents
+- date_range_start
+- date_range_end
+- error_message
+
+Map existing fields safely:
+
+- source_name -> source
+- run_status -> status
+- finished_at -> completed_at
+- records_saved -> new_documents if new_documents field does not exist
+- missing fields should return null or 0, not crash.
+
+H. Create GET /coverage
+
 Create:
+backend/app/api/routes/coverage.py
 
-`backend/scripts/backfill_text_extraction.py`
+Register it in main.py.
 
-It should:
+This endpoint should honestly summarize current historical coverage.
 
-- Use current database config.
-- Run extraction backfill locally or against configured DB.
-- Print:
-  - documents_checked
-  - documents_extracted
-  - documents_skipped
-  - text_blocks_created
-  - errors
+Return:
+{
+"historical_backfill_status": "partial",
+"message": "Full historical APHIS coverage is not complete yet. Current data reflects available ingestion runs and stored documents only.",
+"total_documents": 37,
+"total_documents_with_text": 37,
+"sources_attempted": [...],
+"date_ranges_attempted": [...],
+"total_records_by_source": {...},
+"last_successful_run": {...},
+"coverage_snapshots": []
+}
 
-Task 6 — Fix APHIS enforcement repeated-run behavior:
+If coverage_snapshots table does not exist, do not fail. Infer from source_documents and ingestion_runs and return empty coverage_snapshots.
 
-- Inspect APHIS enforcement ingestion logic.
-- Repeated production verification should rediscover the same enforcement records and return duplicates skipped.
-- Expected second-pass behavior:
-  - `records_found` should equal rediscovered enforcement records.
-  - `records_saved = 0`
-  - `duplicates_skipped > 0`
+I. Create POST /backfill/plan
 
-- If APHIS source page changes or is unavailable, return clear `errors`, not silent success with `records_found=0`.
+Create:
+backend/app/api/routes/backfill.py
 
-Task 7 — Source type naming consistency:
+This endpoint does NOT run scraping.
 
-- DB column is `source_type`.
-- API/n8n sometimes returns `source_subtype`.
-- Do not break current n8n workflow.
-- Add backward-compatible responses that include both:
-  - `source_type`
-  - `source_subtype`
+Input:
+{
+"source": "aphis_inspections",
+"start_date": "2020-01-01",
+"end_date": "2026-06-13",
+"max_pages": 10,
+"dry_run": true
+}
 
-- They can contain the same value for now.
-- Do not rename DB columns in this task.
+Return:
+{
+"source": "...",
+"start_date": "...",
+"end_date": "...",
+"max_pages": 10,
+"dry_run": true,
+"planned_stages": [
+"fetch listing",
+"preserve raw source",
+"compute content hash",
+"dedupe by canonical_key/content_hash",
+"extract text/OCR",
+"store metadata",
+"update coverage"
+],
+"warning": "This endpoint only creates a plan. Full historical backfill is not complete until run logs and coverage records prove it."
+}
 
-Task 8 — Requirements:
+TASK 2: Avoid risky migrations unless necessary
 
-- Add `pypdf` to `backend/requirements.txt` if not already present.
-- Avoid heavy OCR dependencies for now.
-- Do not install Tesseract/PaddleOCR in this task.
-- First goal is embedded-text extraction and searchable text blocks.
-- OCR fallback can be a later task.
+The handoff says new schema columns are missing, but for today the frontend can work without forcing all schema changes.
 
-Task 9 — Verification commands:
-Run:
+Do this:
 
-```powershell
-cd backend
-python -m compileall app scripts
-```
+- Prefer API-level computed fields where possible.
+- Do not add destructive migrations.
+- Only add migrations if they are required for code to run.
+- If adding migration, make it backward-compatible and nullable/defaulted.
+- Do not rename columns like document_title or source_name.
+- Use aliases in API response instead.
 
-If possible, run local smoke/backfill tests.
+Reason:
+The priority is frontend product visibility. Schema hardening can continue after the frontend is alive.
 
-After implementation, update `backend/README.md` with:
+TASK 3: Build frontend from zero
 
-- extraction flow
-- backfill endpoint
-- document_text_blocks verification SQL
-- APHIS pagination note
-- enforcement repeated-run behavior
+The frontend directory currently contains only .gitkeep.
 
-Task 10 — Append/update `AGENT_HANDOFF.md`:
-Include:
+Create React + Vite + TypeScript + Tailwind frontend.
 
-- files changed
-- exact commands run
-- outputs
-- what was fixed
-- what remains blocked
-- how to verify after Railway deployment
-- expected SQL after backfill:
+Required files:
 
-```sql
-SELECT COUNT(*) AS total_text_blocks FROM document_text_blocks;
-```
+- frontend/package.json
+- frontend/index.html
+- frontend/vite.config.ts
+- frontend/tsconfig.json
+- frontend/tailwind.config.js
+- frontend/postcss.config.js
+- frontend/src/main.tsx
+- frontend/src/App.tsx
+- frontend/src/api/client.ts
+- frontend/src/components/Layout.tsx
+- frontend/src/components/Card.tsx
+- frontend/src/components/DataTable.tsx
+- frontend/src/components/StateMessage.tsx
+- frontend/src/pages/Dashboard.tsx
+- frontend/src/pages/Documents.tsx
+- frontend/src/pages/DocumentDetail.tsx
+- frontend/src/pages/Ingestion.tsx
+- frontend/src/pages/Coverage.tsx
+- frontend/src/pages/FutureModules.tsx
+- frontend/src/index.css
 
-Expected after backfill:
+Use:
 
-- should be greater than 0
+- React
+- Vite
+- TypeScript
+- Tailwind CSS
+- react-router-dom
 
-Also include expected n8n/API test:
+TASK 4: Frontend API client
 
-- POST `/extraction/backfill/run` with `x-api-key`
-- then check `document_text_blocks`
+Create frontend/src/api/client.ts
+
+API base URL:
+
+- Use import.meta.env.VITE_API_BASE_URL
+- Default fallback: http://localhost:8000
+
+Create functions:
+
+- getHealth()
+- getStats()
+- getDocuments(params)
+- getDocument(id)
+- getDocumentText(id)
+- getDocumentRaw(id)
+- getIngestionRuns()
+- getCoverage()
+- createBackfillPlan(payload)
+
+Handle errors cleanly.
+Do not crash pages if endpoint returns missing fields.
+
+TASK 5: Frontend layout
+
+Create a clean dashboard-style layout:
+
+- Left sidebar
+- Top header
+- Main content area
+
+Sidebar links:
+
+- Dashboard
+- Documents
+- Ingestion
+- Coverage
+- Future Modules
+
+Default route:
+
+- / redirects to /dashboard
+
+Use a simple professional design:
+
+- light background
+- cards
+- tables
+- badges
+- readable spacing
+- no excessive animations
+- no fake charts unless values are real
+
+TASK 6: Dashboard page
+
+Route:
+/dashboard
+
+Call:
+GET /stats
+
+Show metric cards:
+
+- Total Documents
+- Raw Files Preserved
+- Documents With Text
+- Duplicates Skipped
+- Failed Documents
+- Ingestion Runs
+- Extraction Success Rate
+- QA Needed
+
+Also show:
+
+- Latest ingestion run card
+- Backend health summary if easy to include
+
+Rules:
+
+- If data is missing, show "Not available yet".
+- No hardcoded fake stats.
+- If API fails, show error state with retry.
+
+TASK 7: Documents page
+
+Route:
+/documents
+
+Call:
+GET /documents
+
+Features:
+
+- Search input q
+- Source type filter
+- Extraction status filter
+- Page/page_size support
+- Table columns:
+  - Title
+  - Source Type
+  - Source Name
+  - Retrieved At
+  - Hash short version
+  - Extraction Status badge
+  - Raw Preserved yes/no
+  - View button
+
+Click View goes to:
+/documents/:id
+
+If no documents, show empty state:
+"No documents available yet. Run ingestion to populate the repository."
+
+TASK 8: Document detail page
+
+Route:
+/documents/:id
+
+Call:
+
+- GET /documents/{id}
+- GET /documents/{id}/text
+- GET /documents/{id}/raw
+
+Show:
+
+- Title
+- Source name/type
+- Source URL as clickable link
+- Document date
+- Retrieved timestamp
+- Canonical key
+- Content hash
+- Raw storage path
+- Storage availability
+- Extracted text preview
+- Full extracted text section with scrollable box
+- Metadata JSON panel
+
+No AI summary on this page yet.
+No fake entity extraction yet.
+
+TASK 9: Ingestion page
+
+Route:
+/ingestion
+
+Call:
+GET /ingestion/runs
+
+Show table:
+
+- Run ID
+- Source
+- Run Type
+- Status
+- Started At
+- Completed At
+- Records Found
+- New Documents
+- Duplicates Skipped
+- Failed Documents
+- Error Message
+
+If /ingestion/runs fails but /ingestion-runs works, the backend alias should fix this. Do not make frontend call old path unless absolutely necessary.
+
+TASK 10: Coverage page
+
+Route:
+/coverage
+
+Call:
+GET /coverage
+
+Show:
+
+- Historical backfill status
+- Big warning box:
+  "Full historical APHIS coverage is not complete yet. Current data reflects available ingestion runs and stored documents only."
+- Total documents
+- Documents with text
+- Sources attempted
+- Date ranges attempted
+- Records by source
+- Last successful run
+- Coverage snapshots if available
+
+Also add Backfill Plan form:
+
+- source
+- start_date
+- end_date
+- max_pages
+- dry_run checkbox
+- submit calls POST /backfill/plan
+- display planned stages returned by API
+
+Important:
+This page must not imply historical data is complete.
+
+TASK 11: Future modules page
+
+Route:
+/future-modules
+
+Show disabled cards:
+
+- OCR + QA queue
+- Entity extraction
+- Facility profiles
+- Inspector analytics
+- AI research assistant
+- Case/evidence binder
+- FOIA
+- Public portal
+- Graph intelligence
+
+Each card should have:
+
+- status: "Planned"
+- short reason
+- no fake links to unfinished pages
+
+TASK 12: Styling and states
+
+Every page must include:
+
+- loading state
+- error state
+- empty state
+- fallback text for missing fields
+
+Use badges:
+
+- extracted = green
+- pending = yellow/gray
+- failed = red
+- partial = yellow
+- complete = green
+- not_started = gray
+
+TASK 13: Build/test commands
+
+Add frontend scripts:
+
+- npm run dev
+- npm run build
+- npm run preview
+
+Backend:
+
+- ensure python compile check passes
+- ensure all routers import cleanly
+
+Before finishing, run:
+
+- backend compile check
+- frontend npm install
+- frontend npm run build
+
+If dependency installation is blocked by environment, still create correct package.json and mention the command needed.
+
+TASK 14: Acceptance criteria
+
+Complete only when:
+
+- frontend directory is no longer empty
+- frontend has React/Vite/TypeScript/Tailwind scaffold
+- /dashboard exists and calls real /stats
+- /documents exists and displays real API documents
+- /documents/:id opens detail and text/raw info
+- /ingestion exists and displays run history
+- /coverage exists and clearly says historical backfill is not complete
+- /future-modules exists
+- backend has /stats
+- backend has /documents/{id}/text
+- backend has /documents/{id}/raw
+- backend has /coverage
+- backend has /backfill/plan
+- backend has /ingestion/runs alias
+- no fake data
+- existing ingestion pipeline is not broken
+
+Commit message:
+"Build frontend product skeleton and API visibility endpoints"
