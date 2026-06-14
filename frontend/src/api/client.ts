@@ -125,9 +125,16 @@ export interface CoverageResponse {
   historical_backfill_status: string
   message: string
   sources_attempted: string[]
-  date_ranges_attempted: { start: string; end: string }[]
+  states_attempted: string[]
+  date_ranges_attempted: {
+    source: string | null
+    state_code: string | null
+    start: string
+    end: string
+  }[]
   total_records_by_source: Record<string, number>
-  latest_coverage_snapshots: unknown[]
+  total_records_by_state: Record<string, number>
+  latest_coverage_snapshots: CoverageSnapshot[]
   last_successful_run: {
     id: number
     source: string
@@ -144,12 +151,36 @@ export interface CoverageResponse {
   known_limitations: string[]
 }
 
+export interface CoverageSnapshot {
+  id: number
+  source: string
+  source_type: string | null
+  state_code: string | null
+  date_range_start: string | null
+  date_range_end: string | null
+  filters_json: Record<string, unknown> | null
+  records_found: number
+  records_preserved: number
+  records_extracted: number
+  duplicates_skipped: number
+  failed_documents: number
+  status: string
+  notes: string | null
+  created_at: string | null
+}
+
 export interface BackfillPlanRequest {
   source: string
   start_date: string
   end_date: string
   max_pages: number
   dry_run: boolean
+  state_code?: string
+  license_type?: string
+  facility_name?: string
+  customer_number?: string
+  include_all_states: boolean
+  confirm_large_run: boolean
 }
 
 export interface BackfillPlanResponse {
@@ -158,6 +189,11 @@ export interface BackfillPlanResponse {
   end_date: string
   max_pages: number
   dry_run: boolean
+  state_code: string | null
+  include_all_states: boolean
+  confirm_large_run: boolean
+  states: string[]
+  filters: Record<string, unknown>
   planned_stages: string[]
   warning: string
 }
@@ -170,6 +206,12 @@ export interface BackfillRunRequest {
   page_size: number
   dry_run: boolean
   force_refresh: boolean
+  state_code?: string
+  license_type?: string
+  facility_name?: string
+  customer_number?: string
+  include_all_states: boolean
+  confirm_large_run: boolean
 }
 
 export interface BackfillRunResponse {
@@ -177,14 +219,22 @@ export interface BackfillRunResponse {
   source: string
   status: string
   dry_run: boolean
+  state_code: string | null
+  include_all_states: boolean
+  date_range_start: string
+  date_range_end: string
   records_found: number
   new_documents: number
   duplicates_skipped: number
   failed_documents: number
   records_preserved: number
   records_extracted: number
+  coverage_snapshot_id: number | null
+  coverage_snapshot_ids: number[]
+  filters: Record<string, unknown>
   errors: string[]
   warning: string
+  known_limitations: string[]
 }
 
 export interface IngestionEventItem {

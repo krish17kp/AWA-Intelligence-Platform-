@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Integer, String, Text
+from sqlalchemy import JSON, Column, DateTime, Integer, String, Text
 from sqlalchemy.sql import func
 
 from app.core.database import Base
@@ -13,6 +13,8 @@ class CoverageSnapshot(Base):
 
     source = Column(String(100), nullable=False, index=True)
     source_type = Column(String(100), nullable=True)
+    state_code = Column(String(2), nullable=True, index=True)
+    filters_json = Column(JSON, nullable=True)
     date_range_start = Column(DateTime(timezone=True), nullable=True)
     date_range_end = Column(DateTime(timezone=True), nullable=True)
 
