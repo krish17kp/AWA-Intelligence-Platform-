@@ -1,384 +1,240 @@
 You are working on the AWA Intelligence Platform.
 
-Current completed state from the latest handoff:
+Current completed state:
 
-- Backend product visibility APIs are implemented.
-- Frontend React + Vite + TypeScript + Tailwind product skeleton is built.
-- Pages implemented:
-  - /dashboard
-  - /documents
-  - /documents/:id
-  - /ingestion
-  - /coverage
-  - /future-modules
+- Frontend product skeleton exists.
+- Backend visibility endpoints exist.
+- Controlled historical backfill system exists.
+- `POST /backfill/run` exists.
+- `GET /coverage` reads real coverage_snapshots.
+- `GET /ingestion/runs/{run_id}/events` exists.
+- Coverage page can preview and run controlled backfill.
+- Ingestion page can view event timeline.
+- Migration `d5e6f7a8b9c0` added ingestion_events, coverage_snapshots, and new tracking columns.
+- Commit exists: `b012e4b` — "Add controlled historical backfill execution and coverage tracking".
 
-- Backend endpoints implemented:
-  - GET /health
-  - GET /stats
-  - GET /documents
-  - GET /documents/{id}
-  - GET /documents/{id}/text
-  - GET /documents/{id}/raw
-  - GET /ingestion/runs
-  - GET /coverage
-  - POST /backfill/plan
+Critical known limitations to fix:
 
-- Existing ingestion pipeline must not be broken.
-- Existing frontend must not be rebuilt from scratch.
-- Full historical APHIS backfill is NOT complete yet.
-- /backfill/plan currently only creates a plan and does not run scraping.
-- /coverage currently infers status and does not use real coverage_snapshots.
-- coverage_snapshots table does not exist yet.
-- ingestion_events table does not exist yet.
-- /ingestion/runs currently returns run_type/date ranges as null and duplicates/failed counts as 0.
-- Existing source_documents may have canonical_key=NULL for older pre-migration records.
-- OCR/entity extraction/facility profiles/AI/case binder are not part of this task.
+- APHIS backfill is currently hardcoded to `state_code="TX"`.
+- Full historical APHIS coverage is NOT complete.
+- `duplicate_of` column exists but is not populated.
+- Railway S3 endpoint URL is still unverified.
+- Signed URLs are not implemented for `/documents/{id}/raw`.
+- eCFR/Federal Register backfill delegates to existing adapters with their own limits.
+- Frontend has no authentication; do not solve auth in this task unless required.
 
 Main goal:
-Implement controlled historical backfill execution and real coverage tracking without breaking the existing working pipeline or frontend.
+Fix controlled backfill so it is not hardcoded to Texas, improve coverage reporting, and add verification safety before moving to OCR/entity extraction.
 
-Source of truth:
-Use the Expanded Product Brief direction only:
+Do not rebuild the frontend.
+Do not rebuild the ingestion pipeline.
+Do not implement OCR/entity extraction/facility profiles/AI/case binder in this task.
+Do not claim full historical coverage.
 
-- source preservation before extraction
-- provenance and hashes are mandatory
-- backfill must be auditable
-- do not claim full historical coverage unless run logs and coverage snapshots prove it
-- no AI scraping
-- no fake statistics
-- no dummy data
+TASK 1: Make APHIS backfill configurable
 
-TASK 1: Add database tables and safe columns
+Update backfill request model for `POST /backfill/run` and `POST /backfill/plan`.
 
-Create an Alembic migration.
+Add optional filters:
 
-A. Create ingestion_events table:
+- state_code: optional string
+- license_type: optional string
+- facility_name: optional string
+- customer_number: optional string if supported by existing adapter
+- include_all_states: boolean default false
 
-- id
-- run_id nullable FK to ingestion_runs.id
-- document_id nullable FK to source_documents.id
-- event_type string, required
-- message text, nullable
-- payload json/jsonb nullable
-- created_at timestamp default now
+Rules:
 
-Event types should support at least:
+- If `state_code` is provided, use that state.
+- If `include_all_states=true`, iterate over a safe list of US state codes.
+- If neither `state_code` nor `include_all_states` is provided, default to a safe small state_code like "TX" but return a warning saying default state was used.
+- Do not silently hardcode TX without exposing it in request/response.
+- Keep max_pages cap enforced.
+- Keep dry_run=true as default.
+- Never run unlimited all-state backfill accidentally.
 
-- run_started
-- listing_fetched
-- document_seen
-- duplicate_skipped
-- raw_preserved
-- text_extracted
-- document_failed
-- run_completed
-- run_failed
+TASK 2: Add state coverage tracking
 
-B. Create coverage_snapshots table:
+Update `coverage_snapshots` if needed with safe nullable fields:
 
-- id
-- source string, required
-- source_type string nullable
-- date_range_start nullable date/datetime
-- date_range_end nullable date/datetime
-- records_found integer default 0
-- records_preserved integer default 0
-- records_extracted integer default 0
-- duplicates_skipped integer default 0
-- failed_documents integer default 0
-- status string default "partial"
-- notes text nullable
-- created_at timestamp default now
+- state_code nullable string
+- filters_json nullable JSON/text
 
-C. Add safe nullable/default columns to ingestion_runs if they do not exist:
+If migration is needed, make it backward compatible.
 
-- run_type string default "manual"
-- date_range_start nullable date/datetime
-- date_range_end nullable date/datetime
-- new_documents integer default 0
-- duplicates_skipped integer default 0
-- failed_documents integer default 0
+When a backfill run completes, coverage snapshot should include:
 
-Do not rename existing columns.
-Do not remove records_saved/run_status/source_name.
-API can map old and new fields.
+- source
+- source_type
+- state_code if used
+- date range
+- filters_json
+- records_found
+- records_preserved
+- records_extracted
+- duplicates_skipped
+- failed_documents
+- status
+- notes
 
-D. Add safe nullable/default columns to source_documents if they do not exist:
+TASK 3: Improve `/coverage`
 
-- duplicate_of nullable self-reference if simple to add
-- extraction_status string default "pending"
-- extraction_method nullable string
-- text_storage_path nullable string
+Update `GET /coverage` to return:
 
-Do not break existing records.
-For existing records with text blocks, set extraction_status = "extracted" if possible.
-
-TASK 2: Implement real controlled backfill run endpoint
-
-Create or enhance backend route:
-
-POST /backfill/run
-
-This endpoint should execute a controlled backfill run.
-
-Input:
-{
-"source": "aphis_inspections",
-"start_date": "2026-01-01",
-"end_date": "2026-06-13",
-"max_pages": 2,
-"page_size": 50,
-"dry_run": false,
-"force_refresh": false
-}
-
-Required behavior:
-
-- Create an ingestion_runs row at start.
-- run_type should be "backfill".
-- Save source, date_range_start, date_range_end.
-- Create ingestion_events row: run_started.
-- Fetch listing using the existing adapter/service for the selected source.
-- Do not create a totally separate scraper if working adapters already exist.
-- Respect max_pages/page_size.
-- For every record found:
-  - compute or read canonical_key
-  - compute content_hash when raw content is available
-  - check duplicate by canonical_key and/or content_hash
-  - if duplicate and force_refresh is false:
-    - skip it
-    - increment duplicates_skipped
-    - create ingestion_event duplicate_skipped
-
-  - if new:
-    - preserve raw source first
-    - store metadata in source_documents
-    - extract text using existing text extraction service if available
-    - increment new_documents / records_preserved / records_extracted accordingly
-    - create ingestion_events for document_seen, raw_preserved, text_extracted
-
-  - if failure:
-    - increment failed_documents
-    - create ingestion_event document_failed with error payload
-
-- On completion:
-  - update ingestion_runs status completed
-  - write counts:
-    - records_found
-    - new_documents
-    - duplicates_skipped
-    - failed_documents
-
-  - create coverage_snapshots row
-  - create ingestion_event run_completed
-
-- On exception:
-  - update ingestion_runs status failed
-  - write error_message
-  - create ingestion_event run_failed
-  - return useful error response without hiding the failure.
-
-Important:
-
-- If dry_run = true, do not preserve raw files or insert source_documents.
-- In dry_run, still return expected counts if possible and planned actions.
-- Do not mark historical_backfill_status complete automatically.
-- Mark status partial unless the code has a real source coverage completion check.
-
-TASK 3: Source support
-
-Support these source names if existing adapters allow:
-
-- aphis_inspections
-- aphis_enforcement
-- federal_register
-- ecfr
-
-If a source is unsupported, return 400 with supported source list.
-
-Do not invent successful data for unsupported sources.
-
-TASK 4: Enhance /coverage to use real coverage_snapshots
-
-Update GET /coverage.
-
-It should now:
-
-- read coverage_snapshots if table exists
-- include latest snapshots
-- include total records by source
-- include date ranges attempted
-- include last successful backfill run
-- include historical_backfill_status
+- historical_backfill_status
+- sources_attempted
+- states_attempted
+- date_ranges_attempted
+- total_records_by_source
+- total_records_by_state
+- latest_coverage_snapshots
+- last_successful_run
+- known_limitations
+- explicit message: "Full historical APHIS coverage is not complete unless all required source/date/state ranges have completed coverage snapshots."
 
 Status logic:
 
-- not_started: no source_documents and no coverage_snapshots
-- partial: any documents/snapshots exist but no verified full-source completion
-- complete: only if explicit completion flag/check exists later. For now, do not return complete.
+- not_started: no documents and no snapshots
+- partial: any snapshots or documents exist, but no explicit full coverage verification
+- complete: do not return complete in this task
+
+TASK 4: Add all-state dry run safety
+
+If include_all_states=true:
+
+- First require dry_run=true unless request also includes `confirm_large_run=true`.
+- Add `confirm_large_run` boolean default false.
+- If include_all_states=true and dry_run=false and confirm_large_run=false, return 400 with message:
+  "All-state real backfill requires confirm_large_run=true."
+- Keep max_pages cap.
+- Log one ingestion_run per overall backfill or per state. Choose whichever is simpler, but events must clearly show state-level progress.
+
+TASK 5: Populate duplicate_of when possible
+
+Current dedupe uses canonical_key/content_hash but duplicate_of is not populated.
+
+Improve duplicate handling:
+
+- When duplicate found by canonical_key or content_hash, set duplicate_of to existing source_documents.id if creating a duplicate record.
+- If skipping duplicates without creating new source_documents row, record existing document id in ingestion_event payload:
+  {
+  "duplicate_of": existing_id,
+  "matched_on": "canonical_key" or "content_hash"
+  }
+- Do not create duplicate rows unless force_refresh logic requires it.
+
+TASK 6: Improve `/backfill/run` response
 
 Return:
-{
-"historical_backfill_status": "partial",
-"message": "Full historical APHIS coverage is not complete yet. Current data reflects completed backfill runs and coverage snapshots only.",
-"sources_attempted": [...],
-"date_ranges_attempted": [...],
-"total_records_by_source": {...},
-"latest_coverage_snapshots": [...],
-"last_successful_run": {...},
-"known_limitations": [...]
-}
 
-TASK 5: Enhance /ingestion/runs
-
-Update /ingestion/runs to return real new fields if migration added them:
-
-- run_type
+- run_id
+- status
+- source
+- state_code
+- include_all_states
 - date_range_start
 - date_range_end
+- records_found
 - new_documents
 - duplicates_skipped
 - failed_documents
+- records_preserved
+- records_extracted
+- coverage_snapshot_id if created
+- warning
+- known_limitations
 
-Fallback to old fields only if new fields are null.
+If default state was used, warning should say:
+"APHIS backfill defaulted to state_code=TX because no state_code or include_all_states option was provided."
 
-TASK 6: Add GET /ingestion/runs/{run_id}/events
+TASK 7: Frontend Coverage page update
 
-Create endpoint:
-GET /ingestion/runs/{run_id}/events
+Do not rebuild the page. Update the existing Coverage page.
 
-Return events for a run:
+In the Run Controlled Backfill form add:
 
-- id
-- event_type
-- message
-- document_id
-- payload
-- created_at
+- State Code input/dropdown
+- Include All States checkbox
+- Confirm Large Run checkbox
+- Display current filters in the run result
+- Display states_attempted and total_records_by_state in coverage summary
 
-This will help debugging and demo traceability.
+Rules:
 
-TASK 7: Add frontend support for running controlled backfill
+- If Include All States is checked and Dry Run is unchecked, show visible warning.
+- If Include All States is checked and Confirm Large Run is unchecked, disable real run button or let API return error and display it clearly.
+- Keep the existing warning that full historical APHIS coverage is not complete.
 
-Do not rebuild frontend.
+TASK 8: Production verification helper
 
-Update existing Coverage page.
+Create a simple backend script:
 
-Add section:
-"Run Controlled Backfill"
+`backend/scripts/verify_backfill_readiness.py`
 
-Form fields:
+It should check:
 
-- source dropdown:
-  - aphis_inspections
-  - aphis_enforcement
-  - federal_register
-  - ecfr
+- database connection
+- required tables exist:
+  - source_documents
+  - ingestion_runs
+  - ingestion_events
+  - coverage_snapshots
+  - document_text_blocks
 
-- start_date
-- end_date
-- max_pages
-- page_size
-- dry_run checkbox
-- force_refresh checkbox
+- required endpoints are registered if easily checkable
+- S3/Railway bucket env vars presence
+- warn if storage config is missing or unknown
+- print clear PASS/WARN/FAIL summary
 
-Buttons:
+Do not require this script to contact external APHIS.
 
-- Preview Plan: calls POST /backfill/plan
-- Run Backfill: calls POST /backfill/run
+TASK 9: Manual test commands in README or docs
 
-After run:
+Add a short markdown file:
 
-- show run summary:
-  - run_id
-  - status
-  - records_found
-  - new_documents
-  - duplicates_skipped
-  - failed_documents
+`docs/backfill_testing.md`
 
-- show warning:
-  "This does not mean full historical coverage is complete. Coverage is partial until source/date coverage is validated."
+Include:
 
-Update Ingestion page:
-
-- Add "View Events" action for each run.
-- On click, call GET /ingestion/runs/{run_id}/events
-- Show event timeline/table:
-  - event type
-  - message
-  - document id
-  - timestamp
-
-TASK 8: Add API client functions
-
-Update frontend/src/api/client.ts:
-
-- runBackfill(payload)
-- getIngestionRunEvents(runId)
-
-TASK 9: Backfill safety rules
-
-Strictly follow:
-
-- default max_pages should be small, for example 2 or 5
-- do not accidentally fetch millions of pages
-- no infinite loops
-- log failures instead of crashing silently
-- do not delete existing documents
-- do not overwrite raw preserved source unless force_refresh is true
-- do not claim completion
-- do not create fake snapshots
-- do not create dummy documents
+- dry run single state
+- real run single state with max_pages=1
+- all-state dry run
+- all-state real run safety requirement
+- checking coverage
+- checking ingestion events
+- clear note: "Do not claim full historical coverage until coverage snapshots prove all intended source/date/state ranges were completed."
 
 TASK 10: Verification
 
 Run:
 
 - backend compile check
-- alembic migration
+- alembic upgrade head
 - frontend TypeScript check
 - frontend build
 
 Manual API tests:
 
-- GET /coverage
-- POST /backfill/plan
-- POST /backfill/run with dry_run=true
-- POST /backfill/run with very small real run, max_pages=1
-- GET /ingestion/runs
-- GET /ingestion/runs/{run_id}/events
-- GET /coverage again and confirm snapshot updated
+1. POST /backfill/plan with state_code=CA
+2. POST /backfill/run dry_run=true state_code=CA max_pages=1
+3. POST /backfill/run dry_run=true include_all_states=true max_pages=1
+4. POST /backfill/run dry_run=false include_all_states=true confirm_large_run=false should return 400
+5. GET /coverage should show states_attempted if snapshots exist
+6. GET /ingestion/runs/{run_id}/events should show duplicate_of info when duplicates are skipped
 
-Frontend tests:
+Acceptance criteria:
 
-- Open /coverage
-- Preview plan
-- Run dry run
-- Run small real backfill
-- Confirm run appears in /ingestion
-- Confirm events can be viewed
-- Confirm /documents count updates only when new documents are actually saved
-
-TASK 11: Acceptance criteria
-
-Complete only when:
-
-- ingestion_events table exists
-- coverage_snapshots table exists
-- /backfill/run exists
-- /backfill/run supports dry_run and real controlled run
-- /backfill/run creates ingestion run records
-- /backfill/run creates ingestion events
-- /backfill/run creates coverage snapshot on completion
-- /coverage reads real coverage snapshots
-- /ingestion/runs shows real backfill counts
-- /ingestion/runs/{run_id}/events works
-- Coverage frontend can preview and run controlled backfill
-- Ingestion frontend can show run events
-- No existing frontend pages are broken
-- No existing ingestion adapters are broken
-- No fake historical completion claim is made
+- APHIS backfill no longer silently hardcoded to TX
+- User can select state_code from frontend
+- User can run all-state dry run safely
+- Real all-state run is blocked unless confirmed
+- Coverage shows states attempted
+- Coverage shows records by state
+- Duplicate skip events include existing document id when possible
+- Backfill readiness script exists
+- Backfill testing documentation exists
+- Existing dashboard/documents/ingestion/coverage pages still build
+- No historical completion claim is made
 
 Commit message:
-"Add controlled historical backfill execution and coverage tracking"
+"Parameterize APHIS backfill and improve coverage verification"
